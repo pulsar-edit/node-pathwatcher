@@ -1,5 +1,5 @@
 {
-  "main": "./lib/main",
+  "main": "./src/main",
   "name": "pathwatcher",
   "description": "Watch files and directories for changes",
   "version": "8.1.2",
