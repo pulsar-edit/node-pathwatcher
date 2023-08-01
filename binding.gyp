@@ -14,6 +14,9 @@
         "src",
         '<!(node -e "require(\'nan\')")'
       ],
+      'variables':{
+          'openssl_fips':0
+      },
       "conditions": [
         ['OS=="win"', {
           "sources": [
