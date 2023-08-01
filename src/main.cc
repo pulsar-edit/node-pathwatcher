@@ -16,4 +16,4 @@ void Init(Local<Object> exports) {
 
 }  // namespace
 
-NODE_MODULE(pathwatcher, Init)
+NAN_MODULE_WORKER_ENABLED(pathwatcher, Init)

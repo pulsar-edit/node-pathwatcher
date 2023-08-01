@@ -52,5 +52,8 @@
         }],  # OS~="unix"
       ],
     }
-  ]
+  ],
+  'variables':{
+    'openssl_fips':0
+  },
 }

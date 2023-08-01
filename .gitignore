@@ -5,4 +5,3 @@ lib/
 .node-version
 npm-debug.log
 api.json
-package-lock.json
