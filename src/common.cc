@@ -1,169 +1,173 @@
 #include "common.h"
+#include "addon-data.h"
+#include "uv.h"
 
-static uv_async_t g_async;
-static int g_watch_count;
-static uv_sem_t g_semaphore;
-static uv_thread_t g_thread;
+#include <iostream>
 
-static EVENT_TYPE g_type;
-static WatcherHandle g_handle;
-static std::vector<char> g_new_path;
-static std::vector<char> g_old_path;
-static Nan::Persistent<Function> g_callback;
+using namespace Napi;
 
-static void CommonThread(void* handle) {
-  WaitForMainThread();
-  PlatformThread();
+void CommonInit(Napi::Env env) {
+  auto addonData = env.GetInstanceData<AddonData>();
+  addonData->watch_count = 0;
 }
 
-#if NODE_VERSION_AT_LEAST(0, 11, 13)
-static void MakeCallbackInMainThread(uv_async_t* handle) {
-#else
-static void MakeCallbackInMainThread(uv_async_t* handle, int status) {
-#endif
-  Nan::HandleScope scope;
-
-  if (!g_callback.IsEmpty()) {
-    Local<String> type;
-    switch (g_type) {
-      case EVENT_CHANGE:
-        type = Nan::New("change").ToLocalChecked();
-        break;
-      case EVENT_DELETE:
-        type = Nan::New("delete").ToLocalChecked();
-        break;
-      case EVENT_RENAME:
-        type = Nan::New("rename").ToLocalChecked();
-        break;
-      case EVENT_CHILD_CREATE:
-        type = Nan::New("child-create").ToLocalChecked();
-        break;
-      case EVENT_CHILD_CHANGE:
-        type = Nan::New("child-change").ToLocalChecked();
-        break;
-      case EVENT_CHILD_DELETE:
-        type = Nan::New("child-delete").ToLocalChecked();
-        break;
-      case EVENT_CHILD_RENAME:
-        type = Nan::New("child-rename").ToLocalChecked();
-        break;
-      default:
-        type = Nan::New("unknown").ToLocalChecked();
-        return;
-    }
-
-    Local<Value> argv[] = {
-        type,
-        WatcherHandleToV8Value(g_handle),
-        Nan::New(g_new_path.data(), g_new_path.size()).ToLocalChecked(),
-        Nan::New(g_old_path.data(), g_old_path.size()).ToLocalChecked(),
-    };
-    Local<v8::Context> context = Nan::GetCurrentContext();
-    Nan::New(g_callback)->Call(context, context->Global(), 4, argv).ToLocalChecked();
-  }
-
-  WakeupNewThread();
+PathWatcherWorker::PathWatcherWorker(Napi::Env env, Function &progressCallback) :
+  AsyncProgressQueueWorker(env), _env(env) {
+  shouldStop = false;
+  this->progressCallback.Reset(progressCallback);
 }
 
-static void SetRef(bool value) {
-  uv_handle_t* h = reinterpret_cast<uv_handle_t*>(&g_async);
-  if (value) {
-    uv_ref(h);
-  } else {
-    uv_unref(h);
+void PathWatcherWorker::Execute(
+  const PathWatcherWorker::ExecutionProgress& progress
+) {
+  PlatformThread(progress, shouldStop, _env);
+}
+
+void PathWatcherWorker::Stop() {
+  Napi::Env env = Env();
+  auto addonData = env.GetInstanceData<AddonData>();
+  std::cout << "PathWatcherWorker::Stop for ID: " << addonData->id << std::endl;
+
+  shouldStop = true;
+}
+
+const char* PathWatcherWorker::GetEventTypeString(EVENT_TYPE type) {
+  switch (type) {
+    case EVENT_CHANGE: return "change";
+    case EVENT_DELETE: return "delete";
+    case EVENT_RENAME: return "rename";
+    case EVENT_CHILD_CREATE: return "child-create";
+    case EVENT_CHILD_CHANGE: return "child-change";
+    case EVENT_CHILD_DELETE: return "child-delete";
+    case EVENT_CHILD_RENAME: return "child-rename";
+    default: return "unknown";
   }
 }
 
-void CommonInit() {
-  uv_sem_init(&g_semaphore, 0);
-  uv_async_init(uv_default_loop(), &g_async, MakeCallbackInMainThread);
-  // As long as any uv_ref'd uv_async_t handle remains active, the node
-  // process will never exit, so we must call uv_unref here (#47).
-  SetRef(false);
-  g_watch_count = 0;
-  uv_thread_create(&g_thread, &CommonThread, NULL);
+void PathWatcherWorker::OnProgress(const PathWatcherEvent* data, size_t) {
+  Napi::Env env = Env();
+  HandleScope scope(env);
+  auto addonData = env.GetInstanceData<AddonData>();
+  std::cout << "OnProgress reporting event for environment with ID: " << addonData->id << std::endl;
+  if (this->progressCallback.IsEmpty()) return;
+  std::string newPath(data->new_path.begin(), data->new_path.end());
+  std::string oldPath(data->old_path.begin(), data->old_path.end());
+
+  this->progressCallback.Call({
+    Napi::String::New(Env(), GetEventTypeString(data->type)),
+    WatcherHandleToV8Value(data->handle, Env()),
+    Napi::String::New(Env(), newPath),
+    Napi::String::New(Env(), oldPath)
+  });
 }
 
-void WaitForMainThread() {
-  uv_sem_wait(&g_semaphore);
+void PathWatcherWorker::OnOK() {}
+
+// Called when the first watcher is created.
+void Start(Napi::Env env) {
+  // std::cout << "Start" << std::endl;
+  Napi::HandleScope scope(env);
+  auto addonData = env.GetInstanceData<AddonData>();
+  if (!addonData->callback) {
+    return;
+  }
+
+  Napi::Function fn = addonData->callback.Value();
+
+  addonData->worker = new PathWatcherWorker(env, fn);
+  addonData->worker->Queue();
 }
 
-void WakeupNewThread() {
-  uv_sem_post(&g_semaphore);
+// Called when the last watcher is stopped.
+void Stop(Napi::Env env) {
+  auto addonData = env.GetInstanceData<AddonData>();
+  std::cout << "Stop for ID: " << addonData->id << std::endl;
+  PlatformStop(env);
+  std::cout << "PlatformStop exited for ID: " << addonData->id << std::endl;
+  if (addonData->worker) {
+    addonData->worker->Stop();
+  }
 }
 
-void PostEventAndWait(EVENT_TYPE type,
-                      WatcherHandle handle,
-                      const std::vector<char>& new_path,
-                      const std::vector<char>& old_path) {
-  // FIXME should not pass args by settings globals.
-  g_type = type;
-  g_handle = handle;
-  g_new_path = new_path;
-  g_old_path = old_path;
+Napi::Value SetCallback(const Napi::CallbackInfo& info) {
+  // std::cout << "SetCallback" << std::endl;
+  auto env = info.Env();
+  Napi::HandleScope scope(env);
 
-  uv_async_send(&g_async);
-  WaitForMainThread();
+  if (!info[0].IsFunction()) {
+    Napi::TypeError::New(env, "Function required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  auto addonData = env.GetInstanceData<AddonData>();
+  if (addonData->worker) {
+    // std::cout << "Worker already exists" << std::endl;
+  }
+  addonData->callback.Reset(info[0].As<Napi::Function>(), 1);
+
+  return env.Undefined();
 }
 
-NAN_METHOD(SetCallback) {
-  Nan::HandleScope scope;
+Napi::Value Watch(const Napi::CallbackInfo& info) {
+  // std::cout << "Watch" << std::endl;
+  auto env = info.Env();
+  auto addonData = env.GetInstanceData<AddonData>();
+  Napi::HandleScope scope(env);
 
-  if (!info[0]->IsFunction())
-    return Nan::ThrowTypeError("Function required");
+  if (!info[0].IsString()) {
+    Napi::TypeError::New(env, "String required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
 
-  g_callback.Reset(Local<Function>::Cast(info[0]));
-  return;
-}
+  Napi::String path = info[0].ToString();
+  std::string cppPath(path);
+  WatcherHandle handle = PlatformWatch(cppPath.c_str(), env);
 
-NAN_METHOD(Watch) {
-  Nan::HandleScope scope;
-
-  if (!info[0]->IsString())
-    return Nan::ThrowTypeError("String required");
-
-  Local<v8::Context> context = Nan::GetCurrentContext();
-  Local<String> path = info[0]->ToString(context).ToLocalChecked();
-  WatcherHandle handle = PlatformWatch(*String::Utf8Value(v8::Isolate::GetCurrent(), path));
   if (!PlatformIsHandleValid(handle)) {
     int error_number = PlatformInvalidHandleToErrorNumber(handle);
-    v8::Local<v8::Value> err =
-      v8::Exception::Error(Nan::New<v8::String>("Unable to watch path").ToLocalChecked());
-    v8::Local<v8::Object> err_obj = err.As<v8::Object>();
+    Napi::Error err = Napi::Error::New(env, "Unable to watch path");
+
     if (error_number != 0) {
-      err_obj->Set(context,
-                   Nan::New<v8::String>("errno").ToLocalChecked(),
-                   Nan::New<v8::Integer>(error_number)).FromJust();
-#if NODE_VERSION_AT_LEAST(0, 11, 5)
-      // Node 0.11.5 is the first version to contain libuv v0.11.6, which
-      // contains https://github.com/libuv/libuv/commit/3ee4d3f183 which changes
-      // uv_err_name from taking a struct uv_err_t (whose uv_err_code `code` is
-      // a difficult-to-produce uv-specific errno) to just take an int which is
-      // a negative errno.
-      err_obj->Set(context,
-                   Nan::New<v8::String>("code").ToLocalChecked(),
-                   Nan::New<v8::String>(uv_err_name(-error_number)).ToLocalChecked()).FromJust();
-#endif
+      err.Set("errno", Napi::Number::New(env, error_number));
+      err.Set(
+        "code",
+        Napi::String::New(env, uv_err_name(-error_number))
+      );
     }
-    return Nan::ThrowError(err);
+    err.ThrowAsJavaScriptException();
+    return env.Undefined();
   }
 
-  if (g_watch_count++ == 0)
-    SetRef(true);
+  if (addonData->watch_count++ == 0)
+    Start(env);
 
-  info.GetReturnValue().Set(WatcherHandleToV8Value(handle));
+  return WatcherHandleToV8Value(handle, info.Env());
 }
 
-NAN_METHOD(Unwatch) {
-  Nan::HandleScope scope;
+Napi::Value Unwatch(const Napi::CallbackInfo& info) {
+  // std::cout << "Unwatch" << std::endl;
+  auto env = info.Env();
+  auto addonData = env.GetInstanceData<AddonData>();
+  Napi::HandleScope scope(env);
 
-  if (!IsV8ValueWatcherHandle(info[0]))
-    return Nan::ThrowTypeError("Local type required");
+  if (!IsV8ValueWatcherHandle(info[0])) {
+    Napi::TypeError::New(
+      env,
+      "Local type required"
+    ).ThrowAsJavaScriptException();
+    return env.Null();
+  }
 
-  PlatformUnwatch(V8ValueToWatcherHandle(info[0]));
+#ifdef _WIN32
+  Napi::Value num = info[0];
+#else
+  Napi::Number num = info[0].ToNumber();
+#endif
 
-  if (--g_watch_count == 0)
-    SetRef(false);
+  PlatformUnwatch(V8ValueToWatcherHandle(num), env);
 
-  return;
+  if (--addonData->watch_count == 0)
+    Stop(env);
+
+  return env.Undefined();
 }

@@ -4,10 +4,11 @@
 #include <sys/param.h>
 #include <sys/time.h>
 #include <sys/types.h>
-
+#include <thread>
 #include <algorithm>
-
+#include <fcntl.h>
 #include "common.h"
+#include "addon-data.h"
 
 // test for descriptor event notification, if not available set to O_RDONLY
 #ifndef O_EVTONLY
@@ -19,28 +20,40 @@
 // see: http://fxr.watson.org/fxr/source/bsd/sys/fcntl.h?v=xnu-792.6.70
 #ifndef F_GETPATH
 #define F_GETPATH 50
+
 #endif
 
-static int g_kqueue;
-static int g_init_errno;
+// NOTE: You might see the globals and get nervous here. Our working theory is
+// that this this is fine; this is thread-safe without having to be isolated
+// between contexts.
+// static int g_kqueue;
+// static int g_init_errno;
 
-void PlatformInit() {
-  g_kqueue = kqueue();
-  if (g_kqueue == -1) {
-    g_init_errno = errno;
+void PlatformInit(Napi::Env env) {
+  auto addonData = env.GetInstanceData<AddonData>();
+  addonData->kqueue = kqueue();
+  if (addonData->kqueue == -1) {
+    addonData->init_errno = errno;
     return;
   }
-
-  WakeupNewThread();
 }
 
-void PlatformThread() {
+void PlatformThread(
+  const PathWatcherWorker::ExecutionProgress& progress,
+  bool& shouldStop,
+  Napi::Env env
+) {
+  auto addonData = env.GetInstanceData<AddonData>();
+  int l_kqueue = addonData->kqueue;
+  // std::cout << "PlatformThread " << std::this_thread::get_id() << std::endl;
   struct kevent event;
+  struct timespec timeout = { 0, 500000000 };
 
-  while (true) {
+  while (!shouldStop) {
     int r;
     do {
-      r = kevent(g_kqueue, NULL, 0, &event, 1, NULL);
+      if (shouldStop) return;
+      r = kevent(l_kqueue, NULL, 0, &event, 1, &timeout);
     } while ((r == -1 && errno == EINTR) || r == 0);
 
     EVENT_TYPE type;
@@ -68,13 +81,16 @@ void PlatformThread() {
       continue;
     }
 
-    PostEventAndWait(type, fd, path);
+    // std::cout << "PlatformThread EVENT " << std::this_thread::get_id() << std::endl;
+    PathWatcherEvent event(type, fd, path);
+    progress.Send(&event, 1);
   }
 }
 
-WatcherHandle PlatformWatch(const char* path) {
-  if (g_kqueue == -1) {
-    return -g_init_errno;
+WatcherHandle PlatformWatch(const char* path, Napi::Env env) {
+  auto addonData = env.GetInstanceData<AddonData>();
+  if (addonData->kqueue == -1) {
+    return -addonData->init_errno;
   }
 
   int fd = open(path, O_EVTONLY, 0);
@@ -82,13 +98,13 @@ WatcherHandle PlatformWatch(const char* path) {
     return -errno;
   }
 
-  struct timespec timeout = { 0, 0 };
+  struct timespec timeout = { 0, 50000000 };
   struct kevent event;
   int filter = EVFILT_VNODE;
   int flags = EV_ADD | EV_ENABLE | EV_CLEAR;
   int fflags = NOTE_WRITE | NOTE_DELETE | NOTE_RENAME | NOTE_ATTRIB;
   EV_SET(&event, fd, filter, flags, fflags, 0, reinterpret_cast<void*>(const_cast<char*>(path)));
-  int r = kevent(g_kqueue, &event, 1, NULL, 0, &timeout);
+  int r = kevent(addonData->kqueue, &event, 1, NULL, 0, &timeout);
   if (r == -1) {
     return -errno;
   }
@@ -96,7 +112,8 @@ WatcherHandle PlatformWatch(const char* path) {
   return fd;
 }
 
-void PlatformUnwatch(WatcherHandle fd) {
+
+void PlatformUnwatch(WatcherHandle fd, Napi::Env _env) {
   close(fd);
 }
 
@@ -107,3 +124,5 @@ bool PlatformIsHandleValid(WatcherHandle handle) {
 int PlatformInvalidHandleToErrorNumber(WatcherHandle handle) {
   return -handle;
 }
+
+void PlatformStop(Napi::Env env) {}

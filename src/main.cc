@@ -1,19 +1,22 @@
 #include "common.h"
-#include "handle_map.h"
+#include "addon-data.h"
 
 namespace {
 
-void Init(Local<Object> exports) {
-  CommonInit();
-  PlatformInit();
+  Napi::Object Init(Napi::Env env, Napi::Object exports) {
+    auto* data = new AddonData(env);
+    env.SetInstanceData(data);
 
-  Nan::SetMethod(exports, "setCallback", SetCallback);
-  Nan::SetMethod(exports, "watch", Watch);
-  Nan::SetMethod(exports, "unwatch", Unwatch);
+    CommonInit(env);
+    PlatformInit(env);
 
-  HandleMap::Initialize(exports);
-}
+    exports.Set("setCallback", Napi::Function::New(env, SetCallback));
+    exports.Set("watch", Napi::Function::New(env, Watch));
+    exports.Set("unwatch", Napi::Function::New(env, Unwatch));
 
-}  // namespace
+    return exports;
+  }
 
-NODE_MODULE(pathwatcher, Init)
+} // namespace
+
+NODE_API_MODULE(pathwatcher, Init)

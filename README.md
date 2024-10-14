@@ -1,6 +1,6 @@
 # Path Watcher Node module
 ![ci](https://github.com/atom/node-pathwatcher/workflows/ci/badge.svg)
-[![Depenency Status](https://david-dm.org/atom/node-pathwatcher/status.svg)](https://david-dm.org/atom/node-pathwatcher)
+[![Dependency Status](https://david-dm.org/atom/node-pathwatcher/status.svg)](https://david-dm.org/atom/node-pathwatcher)
 
 ## Installing
 
