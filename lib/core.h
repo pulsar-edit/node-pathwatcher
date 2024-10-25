@@ -6,7 +6,7 @@
 #include <mutex>
 #include "../vendor/efsw/include/efsw/efsw.hpp"
 
-#ifdef __APPLE__
+#ifndef _WIN32
 #include <sys/time.h>
 #endif
 
@@ -22,7 +22,7 @@ typedef efsw::WatchID WatcherHandle;
 struct PathTimestampPair {
   std::string path;
   int 0;
-}
+};
 #else
 struct PathTimestampPair {
   std::string path;
