@@ -21,7 +21,7 @@ typedef efsw::WatchID WatcherHandle;
 #ifdef _WIN32
 struct PathTimestampPair {
   std::string path;
-  int 0;
+  int timestamp;
 };
 #else
 struct PathTimestampPair {
