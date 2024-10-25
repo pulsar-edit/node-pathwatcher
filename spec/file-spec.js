@@ -161,6 +161,36 @@ describe('File', () => {
     });
   });
 
+  describe('when a native watcher is shared by several PathWatchers', () => {
+    let nephewPath = path.join(__dirname, 'fixtures', 'foo', 'bar.txt');
+    let nephewFile = new File(nephewPath);
+    beforeEach(() => {
+      fs.mkdirSync(path.dirname(nephewPath));
+      fs.writeFileSync(nephewPath, 'initial');
+    });
+
+    afterEach(() => {
+      if (fs.existsSync(path.dirname(nephewPath))) {
+        fs.rmSync(path.dirname(nephewPath), { recursive: true });
+      }
+    })
+    it('does not cross-fire events', async () => {
+      let changeHandler1 = jasmine.createSpy('rootChangeHandler');
+      file.onDidChange(changeHandler1);
+      await wait(100);
+
+      let changeHandler2 = jasmine.createSpy('nephewChangeHandler');
+      nephewFile.onDidChange(changeHandler2);
+
+      await wait(100);
+      fs.writeFileSync(nephewPath, 'changed!');
+
+      await condition(() => changeHandler2.calls.count() > 0);
+
+      expect(changeHandler1).not.toHaveBeenCalled();
+    });
+  });
+
   if (process.platform === 'darwin') {
     describe('when the file has already been read', () => {
       beforeEach(() => file.readSync());

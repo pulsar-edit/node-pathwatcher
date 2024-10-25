@@ -457,8 +457,12 @@ class PathWatcher {
             newEvent.path = '';
           }
         } else {
-          newEvent.action = 'change';
-          newEvent.path = '';
+          if (eventPathIsEqual) {
+            newEvent.action = 'change';
+            newEvent.path = '';
+          } else {
+            return;
+          }
         }
         break;
     } // end switch
@@ -479,9 +483,7 @@ class PathWatcher {
     //   'FINAL EVENT ACTION:',
     //   newEvent.action,
     //   'PATH',
-    //   newEvent.path,
-    //   'CALLBACK:',
-    //   callback.toString()
+    //   newEvent.path
     // );
     callback(newEvent.action, newEvent.path);
   }

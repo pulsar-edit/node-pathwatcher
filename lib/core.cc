@@ -12,6 +12,23 @@
 #include <sys/stat.h>
 #endif
 
+#ifdef _WIN32
+static int Now() { return 0; }
+#else
+static timeval Now() {
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  return tv;
+}
+
+static bool PredatesWatchStart(struct timespec fileSpec, timeval startTime) {
+  bool fileEventOlder = fileSpec.tv_sec < startTime.tv_sec || (
+    (fileSpec.tv_sec == startTime.tv_sec) &&
+    ((fileSpec.tv_nsec / 1000) < startTime.tv_usec)
+  );
+  return fileEventOlder;
+}
+#endif
 static std::string EventType(efsw::Action action, bool isChild) {
   switch (action) {
     case efsw::Actions::Add:
@@ -112,9 +129,9 @@ void PathWatcherListener::Stop(efsw::FileWatcher* fileWatcher) {
   Stop();
 }
 
-void PathWatcherListener::AddPath(std::string path, efsw::WatchID handle) {
+void PathWatcherListener::AddPath(PathTimestampPair pair, efsw::WatchID handle) {
   std::lock_guard<std::mutex> lock(pathsMutex);
-  paths[handle] = path;
+  paths[handle] = pair;
 }
 
 void PathWatcherListener::RemovePath(efsw::WatchID handle) {
@@ -144,7 +161,11 @@ void PathWatcherListener::handleFileAction(
   // Since we’re not listening anymore, we have to stop the associated
   // `PathWatcherListener` so that we know when to invoke cleanup and close the
   // open handle.
+  PathTimestampPair pair;
   std::string realPath;
+#ifdef __APPLE__
+  timeval startTime;
+#endif
   {
     std::lock_guard<std::mutex> lock(pathsMutex);
     auto it = paths.find(watchId);
@@ -152,7 +173,11 @@ void PathWatcherListener::handleFileAction(
       // Couldn't find watcher. Assume it's been removed.
       return;
     }
-    realPath = it->second;
+    pair = it->second;
+    realPath = pair.path;
+#ifdef __APPLE__
+    startTime = pair.timestamp;
+#endif
   }
 
   // Don't try to proceed if we've already started the shutdown process.
@@ -182,13 +207,31 @@ void PathWatcherListener::handleFileAction(
   // Luckily, we can easily check whether or not a file has actually been
   // created on macOS: we can compare creation time to modification time. This
   // weeds out most of the false positives.
-  if (action == efsw::Action::Add) {
+  {
     struct stat file;
-    if (stat(newPathStr.c_str(), &file) != 0) {
+    if (stat(newPathStr.c_str(), &file) != 0 && action != efsw::Action::Delete) {
       return;
     }
-    if (file.st_birthtimespec.tv_sec != file.st_mtimespec.tv_sec) {
-      return;
+    if (action == efsw::Action::Add) {
+      if (file.st_birthtimespec.tv_sec != file.st_mtimespec.tv_sec) {
+#ifdef DEBUG
+  std::cout << "Not a file creation! (skipping)" << std::endl;
+#endif
+        return;
+      }
+      if (PredatesWatchStart(file.st_birthtimespec, startTime)) {
+#ifdef DEBUG
+  std::cout << "File was created before we started this path watcher! (skipping)" << std::endl;
+#endif
+        return;
+      }
+    } else if (action == efsw::Action::Modified) {
+      if (PredatesWatchStart(file.st_mtimespec, startTime)) {
+#ifdef DEBUG
+  std::cout << "File was modified before we started this path watcher! (skipping)" << std::endl;
+#endif
+        return;
+      }
     }
   }
 #endif
@@ -249,6 +292,7 @@ PathWatcher::~PathWatcher() {
 // Watch a given path. Returns a handle.
 Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
   auto env = info.Env();
+  auto now = Now();
 
   // First argument must be a string.
   if (!info[0].IsString()) {
@@ -298,7 +342,8 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
   WatcherHandle handle = fileWatcher->addWatch(cppPath, listener, true);
 
   if (handle >= 0) {
-    listener->AddPath(cppPath, handle);
+    PathTimestampPair pair = { cppPath, now };
+    listener->AddPath(pair, handle);
   } else {
     // if (listener->IsEmpty()) delete listener;
     Napi::Error::New(env, "Failed to add watch; unknown error").ThrowAsJavaScriptException();

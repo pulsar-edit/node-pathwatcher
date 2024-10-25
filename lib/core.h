@@ -6,6 +6,10 @@
 #include <mutex>
 #include "../vendor/efsw/include/efsw/efsw.hpp"
 
+#ifdef __APPLE__
+#include <sys/time.h>
+#endif
+
 #ifdef _WIN32
 #define PATH_SEPARATOR '\\'
 #else
@@ -13,6 +17,18 @@
 #endif
 
 typedef efsw::WatchID WatcherHandle;
+
+#ifdef _WIN32
+struct PathTimestampPair {
+  std::string path;
+  int 0;
+}
+#else
+struct PathTimestampPair {
+  std::string path;
+  timeval timestamp;
+};
+#endif
 
 struct PathWatcherEvent {
   efsw::Action type;
@@ -73,7 +89,7 @@ public:
     std::string oldFilename
   ) override;
 
-  void AddPath(std::string path, efsw::WatchID handle);
+  void AddPath(PathTimestampPair pair, efsw::WatchID handle);
   void RemovePath(efsw::WatchID handle);
   bool IsEmpty();
   void Stop();
@@ -84,7 +100,7 @@ private:
   std::mutex shutdownMutex;
   std::mutex pathsMutex;
   Napi::ThreadSafeFunction tsfn;
-  std::unordered_map<efsw::WatchID, std::string> paths;
+  std::unordered_map<efsw::WatchID, PathTimestampPair> paths;
 };
 
 
