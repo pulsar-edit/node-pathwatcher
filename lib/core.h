@@ -4,6 +4,7 @@
 #include <string>
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
 #include "../vendor/efsw/include/efsw/efsw.hpp"
 
 #ifndef _WIN32
