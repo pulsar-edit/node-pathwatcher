@@ -142,7 +142,11 @@ describe('PathWatcher', () => {
       subDirFile = path.join(subDir, 'test.txt');
 
       let subHandle = PathWatcher.watch(subDir, subDirCallback);
-      expect(PathWatcher.getNativeWatcherCount()).toBe(1);
+
+      let shouldConsolidate = subHandle.registry.options.reuseAncestorWatchers;
+      expect(
+        PathWatcher.getNativeWatcherCount()
+      ).toBe(shouldConsolidate ? 1 : 2);
 
       fs.writeFileSync(tempFile, 'change');
       await condition(() => rootCallback.calls.count() >= 1);
