@@ -322,6 +322,14 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
+  // Second argument is optional and tells us whether to use a recursive
+  // watcher. Defaults to `false`.
+  bool useRecursiveWatcher = false;
+  if (info[1].IsBoolean()) {
+    auto recursiveOption = info[1].As<Napi::Boolean>();
+    useRecursiveWatcher = recursiveOption;
+  }
+
   // The wrapper JS will resolve this to the file's real path. We expect to be
   // dealing with real locations on disk, since that's what EFSW will report to
   // us anyway.
@@ -368,7 +376,7 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
 
   // EFSW represents watchers as unsigned `int`s; we can easily convert these
   // to JavaScript.
-  WatcherHandle handle = fileWatcher->addWatch(cppPath, listener, true);
+  WatcherHandle handle = fileWatcher->addWatch(cppPath, listener, useRecursiveWatcher);
 
 #ifdef DEBUG
   std::cout << " handle: [" << handle << "]" << std::endl;
@@ -406,6 +414,12 @@ Napi::Value PathWatcher::Unwatch(const Napi::CallbackInfo& info) {
 
   // EFSW doesn’t mind if we give it a handle that it doesn’t recognize; it’ll
   // just silently do nothing.
+  //
+  // This is useful because removing watcher can innocuously error anyway on
+  // certain platforms. For instance, Linux will automatically stop watching a
+  // directory when it gets deleted, and will then complain when you try to
+  // stop the watcher that was already stopped. This shows up in debug logging
+  // but is otherwise safe to ignore.
   fileWatcher->removeWatch(handle);
   listener->RemovePath(handle);
 

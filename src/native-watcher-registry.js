@@ -73,7 +73,7 @@ class RegistryTree {
     // existing watcher.
     const attachToAncestor = (absolutePaths, childPaths) => {
       let ancestorAbsolutePath = absolute(...absolutePaths);
-      let native = this.createNative(ancestorAbsolutePath);
+      let native = this.createNative(ancestorAbsolutePath, this.options);
       let leaf = new RegistryWatcherNode(
         native,
         absolutePaths,
@@ -87,7 +87,7 @@ class RegistryTree {
 
     // Scenario in which we're attaching directly to a specific path.
     const attachToNew = (childPaths) => {
-      const native = this.createNative(absolutePath);
+      const native = this.createNative(absolutePath, this.options);
       const leaf = new RegistryWatcherNode(
         native,
         absolutePathSegments,
