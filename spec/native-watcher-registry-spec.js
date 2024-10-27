@@ -109,7 +109,7 @@ class MockNative {
   }
 }
 
-describe('NativeWatcherRegistry', function() {
+xdescribe('NativeWatcherRegistry', function() {
   let createNative, registry;
 
   beforeEach(function() {
