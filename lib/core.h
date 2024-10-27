@@ -37,16 +37,23 @@ struct PathWatcherEvent {
   std::vector<char> new_path;
   std::vector<char> old_path;
 
+  std::string watcher_path;
+
   // Default constructor
   PathWatcherEvent() = default;
 
   // Constructor
-  PathWatcherEvent(efsw::Action t, efsw::WatchID h, const std::vector<char>& np, const std::vector<char>& op = std::vector<char>())
-    : type(t), handle(h), new_path(np), old_path(op) {}
+  PathWatcherEvent(
+    efsw::Action t,
+    efsw::WatchID h,
+    const std::vector<char>& np,
+    const std::vector<char>& op = std::vector<char>(),
+    const std::string& wp = ""
+  ) : type(t), handle(h), new_path(np), old_path(op), watcher_path(wp) {}
 
   // Copy constructor
   PathWatcherEvent(const PathWatcherEvent& other)
-    : type(other.type), handle(other.handle), new_path(other.new_path), old_path(other.old_path) {}
+    : type(other.type), handle(other.handle), new_path(other.new_path), old_path(other.old_path), watcher_path(other.watcher_path) {}
 
   // Copy assignment operator
   PathWatcherEvent& operator=(const PathWatcherEvent& other) {
@@ -55,6 +62,7 @@ struct PathWatcherEvent {
       handle = other.handle;
       new_path = other.new_path;
       old_path = other.old_path;
+      watcher_path = other.watcher_path;
     }
     return *this;
   }
@@ -62,7 +70,7 @@ struct PathWatcherEvent {
   // Move constructor
   PathWatcherEvent(PathWatcherEvent&& other) noexcept
     : type(other.type), handle(other.handle),
-    new_path(std::move(other.new_path)), old_path(std::move(other.old_path)) {}
+    new_path(std::move(other.new_path)), old_path(std::move(other.old_path)), watcher_path(std::move(other.watcher_path)) {}
 
   // Move assignment operator
   PathWatcherEvent& operator=(PathWatcherEvent&& other) noexcept {
@@ -71,6 +79,7 @@ struct PathWatcherEvent {
       handle = other.handle;
       new_path = std::move(other.new_path);
       old_path = std::move(other.old_path);
+      watcher_path = std::move(other.watcher_path);
     }
     return *this;
   }

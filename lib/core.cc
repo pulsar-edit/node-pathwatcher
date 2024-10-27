@@ -13,14 +13,23 @@
 #endif
 
 #ifdef _WIN32
+// Stub out this function on Windows. For now we don't have a need to compare
+// watcher start times to file creation/modification times, so this isn't
+// necessary. (Likewise, we're careful to conceal `PredatesWatchStart` calls
+// behind `#ifdef`s, so we don’t need to define it at all.)
 static int Now() { return 0; }
 #else
+
+// Returns the current Unix timestamp.
 static timeval Now() {
   struct timeval tv;
   gettimeofday(&tv, nullptr);
   return tv;
 }
 
+// Given a Unix timestamp and a file `timespec`, decides whether the file’s
+// timestamp predates the Unix timestamp. Used to compare creation/modification
+// times to arbitrary points in time.
 static bool PredatesWatchStart(struct timespec fileSpec, timeval startTime) {
   bool fileEventOlder = fileSpec.tv_sec < startTime.tv_sec || (
     (fileSpec.tv_sec == startTime.tv_sec) &&
@@ -29,6 +38,7 @@ static bool PredatesWatchStart(struct timespec fileSpec, timeval startTime) {
   return fileEventOlder;
 }
 #endif
+
 static std::string EventType(efsw::Action action, bool isChild) {
   switch (action) {
     case efsw::Actions::Add:
@@ -52,19 +62,23 @@ static bool EnvIsStopping(Napi::Env env) {
 }
 
 // Ensure a given path has a trailing separator for comparison purposes.
-// static std::string NormalizePath(std::string path) {
-//   if (path.back() == PATH_SEPARATOR) return path;
-//   return path + PATH_SEPARATOR;
-// }
+static std::string NormalizePath(std::string path) {
+  if (path.back() == PATH_SEPARATOR) return path;
+  return path + PATH_SEPARATOR;
+}
 
-// static bool PathsAreEqual(std::string pathA, std::string pathB) {
-//   return NormalizePath(pathA) == NormalizePath(pathB);
-// }
+static bool PathsAreEqual(std::string pathA, std::string pathB) {
+  return NormalizePath(pathA) == NormalizePath(pathB);
+}
 
 // This is the main-thread function that receives all `ThreadSafeFunction`
 // calls. It converts the `PathWatcherEvent` struct into JS values before
 // invoking our callback.
-static void ProcessEvent(Napi::Env env, Napi::Function callback, PathWatcherEvent* event) {
+static void ProcessEvent(
+  Napi::Env env,
+  Napi::Function callback,
+  PathWatcherEvent* event
+) {
   // Translate the event type to the expected event name in the JS code.
   //
   // NOTE: This library previously envisioned that some platforms would allow
@@ -77,8 +91,6 @@ static void ProcessEvent(Napi::Env env, Napi::Function callback, PathWatcherEven
   // if we're watching a directory and that directory itself is deleted, then
   // that should be `delete` rather than `child-delete`. Right now we deal with
   // that in JavaScript, but we could handle it here instead.
-  std::string eventName = EventType(event->type, true);
-
   if (EnvIsStopping(env)) return;
 
   std::string newPath;
@@ -92,7 +104,17 @@ static void ProcessEvent(Napi::Env env, Napi::Function callback, PathWatcherEven
     oldPath.assign(event->old_path.begin(), event->old_path.end());
   }
 
-  // Use a try-catch block only for the Node-API call, which might throw
+  // Since we watch directories, most sorts of events will only happen to files
+  // within the directories…
+  bool isChildEvent = true;
+  if (PathsAreEqual(newPath, event->watcher_path)) {
+    // …but the `delete` event can happen to the directory itself, in which
+    // case we should report it as `delete` rather than `child-delete`.
+    isChildEvent = false;
+  }
+
+  std::string eventName = EventType(event->type, isChildEvent);
+
   try {
     callback.Call({
       Napi::String::New(env, eventName),
@@ -120,23 +142,27 @@ void PathWatcherListener::Stop() {
 }
 
 void PathWatcherListener::Stop(efsw::FileWatcher* fileWatcher) {
-  {
-    for (auto& it : paths) {
-      fileWatcher->removeWatch(it.first);
-    }
-    paths.clear();
+  for (auto& it : paths) {
+    fileWatcher->removeWatch(it.first);
   }
+  paths.clear();
   Stop();
 }
 
+// Correlate a watch ID to a path/timestamp pair.
 void PathWatcherListener::AddPath(PathTimestampPair pair, efsw::WatchID handle) {
   std::lock_guard<std::mutex> lock(pathsMutex);
   paths[handle] = pair;
 }
 
+// Remove metadata for a given watch ID.
 void PathWatcherListener::RemovePath(efsw::WatchID handle) {
   std::lock_guard<std::mutex> lock(pathsMutex);
   auto it = paths.find(handle);
+#ifdef DEBUG
+  std::cout << "Unwatching handle: [" << handle << "] path: [" << it->second.path << "]" << std::endl;
+#endif
+
   if (it == paths.end()) return;
   paths.erase(it);
 }
@@ -153,14 +179,16 @@ void PathWatcherListener::handleFileAction(
   efsw::Action action,
   std::string oldFilename
 ) {
-
 #ifdef DEBUG
   std::cout << "PathWatcherListener::handleFileAction dir: " << dir << " filename: " << filename << " action: " << EventType(action, true) << std::endl;
 #endif
+  // Don't try to proceed if we've already started the shutdown process.
+  if (isShuttingDown) return;
+  std::lock_guard<std::mutex> lock(shutdownMutex);
+  if (isShuttingDown) return;
 
-  // Since we’re not listening anymore, we have to stop the associated
-  // `PathWatcherListener` so that we know when to invoke cleanup and close the
-  // open handle.
+  // Extract the expected watcher path and (on macOS) the start time of the
+  // watcher.
   PathTimestampPair pair;
   std::string realPath;
 #ifdef __APPLE__
@@ -180,23 +208,8 @@ void PathWatcherListener::handleFileAction(
 #endif
   }
 
-  // Don't try to proceed if we've already started the shutdown process.
-  if (isShuttingDown) return;
-  std::lock_guard<std::mutex> lock(shutdownMutex);
-  if (isShuttingDown) return;
-
   std::string newPathStr = dir + filename;
   std::vector<char> newPath(newPathStr.begin(), newPathStr.end());
-
-  // if (PathsAreEqual(newPathStr, realPath)) {
-  //   // This is an event that is happening to the directory itself — like the
-  //   // directory being deleted. Allow it through.
-  // } else if (dir != NormalizePath(realPath)) {
-  //   // Otherwise, we would expect `dir` to be equal to `realPath`; if it isn't,
-  //   // then we should ignore it. This might be an event that happened to an
-  //   // ancestor folder or a descendent folder somehow.
-  //   return;
-  // }
 
 #ifdef __APPLE__
   // macOS seems to think that lots of file creations happen that aren't
@@ -210,15 +223,22 @@ void PathWatcherListener::handleFileAction(
   {
     struct stat file;
     if (stat(newPathStr.c_str(), &file) != 0 && action != efsw::Action::Delete) {
+      // If this was a delete action, the file is _expected_ not to exist
+      // anymore. Otherwise it's a strange outcome and it means we should
+      // ignore this event.
       return;
     }
+
     if (action == efsw::Action::Add) {
+      // One easy way to check if a file was truly just created: does its
+      // creation time match its modification time? If not, the file has been
+      // written to since its creation.
       if (file.st_birthtimespec.tv_sec != file.st_mtimespec.tv_sec) {
-#ifdef DEBUG
-  std::cout << "Not a file creation! (skipping)" << std::endl;
-#endif
         return;
       }
+
+      // Next, weed out unnecessary `create` and `change` events that represent
+      // file actions that happened before we started watching.
       if (PredatesWatchStart(file.st_birthtimespec, startTime)) {
 #ifdef DEBUG
   std::cout << "File was created before we started this path watcher! (skipping)" << std::endl;
@@ -250,7 +270,7 @@ void PathWatcherListener::handleFileAction(
     return;
   }
 
-  PathWatcherEvent* event = new PathWatcherEvent(action, watchId, newPath, oldPath);
+  PathWatcherEvent* event = new PathWatcherEvent(action, watchId, newPath, oldPath, realPath);
 
   // TODO: Instead of calling `BlockingCall` once per event, throttle them by
   // some small amount of time (like 50-100ms). That will allow us to deliver
@@ -272,7 +292,7 @@ PathWatcher::PathWatcher(Napi::Env env, Napi::Object exports) {
   envId = next_env_id++;
 
 #ifdef DEBUG
-  std::cout << "THIS IS A DEBUG BUILD!" << std::endl;
+  std::cout << "Initializing PathWatcher" << std::endl;
 #endif
 
   DefineAddon(exports, {
@@ -292,6 +312,8 @@ PathWatcher::~PathWatcher() {
 // Watch a given path. Returns a handle.
 Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
   auto env = info.Env();
+  // Record the current timestamp as early as possible. We'll use this as a way
+  // of ignoring file-watcher events that happened before we started watching.
   auto now = Now();
 
   // First argument must be a string.
@@ -306,6 +328,10 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
   Napi::String path = info[0].ToString();
   std::string cppPath(path);
 
+#ifdef DEBUG
+  std::cout << "PathWatcher::Watch path: [" << cppPath << "]" << std::endl;
+#endif
+
   // It's invalid to call `watch` before having set a callback via
   // `setCallback`.
   if (callback.IsEmpty()) {
@@ -314,6 +340,9 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
   }
 
   if (!isWatching) {
+#ifdef DEBUG
+    std::cout << "  Creating ThreadSafeFunction and FileWatcher" << std::endl;
+#endif
     tsfn = Napi::ThreadSafeFunction::New(
       env,
       callback.Value(),
@@ -341,18 +370,25 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
   // to JavaScript.
   WatcherHandle handle = fileWatcher->addWatch(cppPath, listener, true);
 
+#ifdef DEBUG
+  std::cout << " handle: [" << handle << "]" << std::endl;
+#endif
+
   if (handle >= 0) {
+    // For each new watched path, remember both the normalized path and the
+    // time we started watching it.
     PathTimestampPair pair = { cppPath, now };
     listener->AddPath(pair, handle);
   } else {
-    // if (listener->IsEmpty()) delete listener;
-    Napi::Error::New(env, "Failed to add watch; unknown error").ThrowAsJavaScriptException();
+    auto error = Napi::Error::New(env, "Failed to add watch; unknown error");
+    error.Set("code", Napi::Number::New(env, handle));
+    error.ThrowAsJavaScriptException();
     return env.Null();
   }
 
   // The `watch` function returns a JavaScript number much like `setTimeout` or
-  // `setInterval` would; this is the handle that the consumer can use to
-  // unwatch the path later.
+  // `setInterval` would; this is the handle that the wrapper JavaScript can
+  // use to unwatch the path later.
   return WatcherHandleToV8Value(handle, env);
 }
 
@@ -374,6 +410,9 @@ Napi::Value PathWatcher::Unwatch(const Napi::CallbackInfo& info) {
   listener->RemovePath(handle);
 
   if (listener->IsEmpty()) {
+#ifdef DEBUG
+    std::cout << "Cleaning up!" << std::endl;
+#endif
     Cleanup(env);
     isWatching = false;
   }
