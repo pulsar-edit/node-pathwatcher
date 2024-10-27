@@ -589,24 +589,56 @@ class PathWatcher {
   }
 }
 
-const REGISTRY = new NativeWatcherRegistry((normalizedPath) => {
-  if (!initialized) {
-    binding.setCallback(DEFAULT_CALLBACK);
-    initialized = true;
+function getDefaultRegistryOptionsForPlatform (platform) {
+  switch (platform) {
+    case 'linux':
+    case 'win32':
+      return {
+        reuseAncestorWatchers: true,
+        relocateDescendantWatchers: false,
+        relocateAncestorWatchers: true,
+        mergeWatchersWithCommonAncestors: false
+      };
+    case 'darwin':
+      return {
+        reuseAncestorWatchers: true,
+        relocateDescendantWatchers: false,
+        relocateAncestorWatchers: true,
+        mergeWatchersWithCommonAncestors: true,
+        maxCommonAncestorLevel: 2
+      };
+    default:
+      return {
+        reuseAncestorWatchers: true,
+        relocateDescendantWatchers: false,
+        relocateAncestorWatchers: true,
+        mergeWatchersWithCommonAncestors: false
+      };
   }
+}
 
-  // It's important that this function be able to return an existing instance
-  // of `NativeWatcher` when present. Otherwise, the registry will try to
-  // create a new instance at the same path, and the native bindings won't
-  // allow that to happen.
-  //
-  // It's also important because the registry might respond to a sibling
-  // `PathWatcher`’s removal by trying to reattach us — even though our
-  // `NativeWatcher` still works just fine. The way around that is to make sure
-  // that this function will return the same watcher we're already using
-  // instead of creating a new one.
-  return NativeWatcher.findOrCreate(normalizedPath);
-});
+
+const REGISTRY = new NativeWatcherRegistry(
+  (normalizedPath) => {
+    if (!initialized) {
+      binding.setCallback(DEFAULT_CALLBACK);
+      initialized = true;
+    }
+
+    // It's important that this function be able to return an existing instance
+    // of `NativeWatcher` when present. Otherwise, the registry will try to
+    // create a new instance at the same path, and the native bindings won't
+    // allow that to happen.
+    //
+    // It's also important because the registry might respond to a sibling
+    // `PathWatcher`’s removal by trying to reattach us — even though our
+    // `NativeWatcher` still works just fine. The way around that is to make sure
+    // that this function will return the same watcher we're already using
+    // instead of creating a new one.
+    return NativeWatcher.findOrCreate(normalizedPath);
+  },
+  getDefaultRegistryOptionsForPlatform(process.platform)
+);
 
 class WatcherEvent {
   constructor(event, filePath, oldFilePath) {

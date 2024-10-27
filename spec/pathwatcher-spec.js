@@ -191,15 +191,20 @@ describe('PathWatcher', () => {
       }
     });
 
-    it('should consolidate them into one watcher on the parent', async () => {
+    it('should consolidate them into one watcher on the parent (unless options prohibit it)', async () => {
       let watchCallback = jasmine.createSpy('watch-callback');
       let watcherA = PathWatcher.watch(siblingA, watchCallback);
       await wait(100);
       expect(watcherA.native.path).toBe(siblingA);
       let watcherB = PathWatcher.watch(siblingB, watchCallback);
       await wait(100);
-      expect(watcherB.native.path).toBe(path.dirname(siblingB));
-      expect(PathWatcher.getNativeWatcherCount()).toBe(1);
+      // The watchers will only be consolidated in this scenario if the
+      // registry is configured to do so.
+      let shouldConsolidate = watcherB.registry.options.mergeWatchersWithCommonAncestors;
+      expect(
+        watcherB.native.path
+      ).toBe(shouldConsolidate ? path.dirname(siblingB) : siblingB);
+      expect(PathWatcher.getNativeWatcherCount()).toBe(shouldConsolidate ? 1 : 2);
     });
   });
 
@@ -225,7 +230,7 @@ describe('PathWatcher', () => {
       }
     });
 
-    it('should consolidate them into one watcher on the grandparent', async () => {
+    it('should consolidate them into one watcher on the grandparent (unless options prohibit it)', async () => {
       let watchCallbackA = jasmine.createSpy('watch-callback-a');
       let watchCallbackB = jasmine.createSpy('watch-callback-b');
       let watcherA = PathWatcher.watch(cousinA, watchCallbackA);
@@ -233,9 +238,17 @@ describe('PathWatcher', () => {
       expect(watcherA.native.path).toBe(cousinA);
       let watcherB = PathWatcher.watch(cousinB, watchCallbackB);
       await wait(100);
-      expect(watcherB.native.path).toBe(fs.realpathSync(tempDir));
 
-      expect(PathWatcher.getNativeWatcherCount()).toBe(1);
+      // The watchers will only be consolidated in this scenario if the
+      // registry is configured to do so.
+      let shouldConsolidate = watcherB.registry.options.mergeWatchersWithCommonAncestors;
+      shouldConsolidate &&= watcherB.registry.options.maxCommonAncestorLevel >= 2;
+
+      expect(
+        watcherB.native.path
+      ).toBe(shouldConsolidate ? fs.realpathSync(tempDir) : cousinB);
+
+      expect(PathWatcher.getNativeWatcherCount()).toBe(shouldConsolidate ? 1 : 2);
 
       fs.writeFileSync(path.join(cousinA, 'file'), 'test');
       await condition(() => watchCallbackA.calls.count() > 0);
@@ -245,6 +258,8 @@ describe('PathWatcher', () => {
       fs.writeFileSync(path.join(cousinB, 'file'), 'test');
       await condition(() => watchCallbackB.calls.count() > 0);
       expect(watchCallbackA.calls.count()).toBe(0);
+
+      if (!shouldConsolidate) return;
 
       // When we close `watcherB`, that's our opportunity to move the watcher closer to `watcherA`.
       watcherB.close();
