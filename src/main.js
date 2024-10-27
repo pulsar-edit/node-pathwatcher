@@ -594,9 +594,9 @@ function getDefaultRegistryOptionsForPlatform (platform) {
     case 'linux':
     case 'win32':
       return {
-        reuseAncestorWatchers: true,
+        reuseAncestorWatchers: false,
         relocateDescendantWatchers: false,
-        relocateAncestorWatchers: true,
+        relocateAncestorWatchers: false,
         mergeWatchersWithCommonAncestors: false
       };
     case 'darwin':
