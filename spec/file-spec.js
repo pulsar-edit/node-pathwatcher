@@ -165,8 +165,12 @@ describe('File', () => {
     let nephewPath = path.join(__dirname, 'fixtures', 'foo', 'bar.txt');
     let nephewFile = new File(nephewPath);
     beforeEach(() => {
-      fs.mkdirSync(path.dirname(nephewPath));
-      fs.writeFileSync(nephewPath, 'initial');
+      if (!fs.existsSync(path.dirname(nephewPath))) {
+        fs.mkdirSync(path.dirname(nephewPath));
+      }
+      if (!fs.existsSync(nephewPath)) {
+        fs.writeFileSync(nephewPath, 'initial');
+      }
     });
 
     afterEach(() => {
@@ -186,7 +190,6 @@ describe('File', () => {
       fs.writeFileSync(nephewPath, 'changed!');
 
       await condition(() => changeHandler2.calls.count() > 0);
-
       expect(changeHandler1).not.toHaveBeenCalled();
     });
   });
@@ -304,7 +307,10 @@ describe('File', () => {
 
     describe('when a file is moved to the trash', () => {
       const MACOS_TRASH_DIR = path.join(process.env.HOME, '.Trash');
-      let expectedTrashPath = path.join(MACOS_TRASH_DIR, 'file-was-moved-to-trash.txt');
+      let expectedTrashPath = path.join(
+        MACOS_TRASH_DIR,
+        `file-was-moved-to-trash-${Math.round(Math.random() * 1000)}.txt`
+      );
 
       it('triggers a delete event', async () => {
         let deleteHandler = jasmine.createSpy('deleteHandler');

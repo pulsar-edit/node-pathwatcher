@@ -1,13 +1,19 @@
 let binding;
-try {
-  binding = require('../build/Debug/pathwatcher.node');
-} catch (err) {
-  binding = require('../build/Release/pathwatcher.node');
-}
-const { Emitter, Disposable, CompositeDisposable } = require('event-kit');
+// console.log('ENV:', process.NODE_ENV);
+// if (process.NODE_ENV === 'DEV') {
+  try {
+    binding = require('../build/Debug/pathwatcher.node');
+  } catch (err) {
+    binding = require('../build/Release/pathwatcher.node');
+  }
+// } else {
+//   binding = require('../build/Release/pathwatcher.node');
+// }
+
 const fs = require('fs');
-const { NativeWatcherRegistry } = require('./native-watcher-registry');
 const path = require('path');
+const { Emitter, Disposable, CompositeDisposable } = require('event-kit');
+const { NativeWatcherRegistry } = require('./native-watcher-registry');
 
 let initialized = false;
 
@@ -22,28 +28,41 @@ function isDirectory (somePath) {
   return stats.isDirectory();
 }
 
-// function wait (ms) {
-//   return new Promise(r => setTimeout(r, ms));
-// }
+class WatcherError extends Error {
+  constructor(message, code) {
+    super(message);
+    this.name = 'WatcherError';
+    this.code = code;
+  }
+}
 
-// function normalizePath(rawPath) {
-//   if (rawPath.endsWith(path.sep)) return rawPath;
-//   return rawPath + path.sep;
-// }
+function getRealFilePath (filePath) {
+  try {
+    return fs.realpathSync(filePath) ?? filePath;
+  } catch (_err) {
+    return filePath;
+  }
+}
 
-// function pathsAreEqual(pathA, pathB) {
-//   return normalizePath(pathA) == normalizePath(pathB);
-// }
-
-// function equalsOrDescendsFromPath(filePath, possibleParentPath) {
-//   if (pathsAreEqual(filePath, possibleParentPath)) return true;
-//   filePath = normalizePath(filePath);
-//   possibleParentPath = normalizePath(possibleParentPath);
-//   return filePath?.startsWith(possibleParentPath);
-// }
+function isDirectory (filePath) {
+  let stats = fs.statSync(filePath);
+  return stats.isDirectory();
+}
 
 let NativeWatcherId = 1;
 
+// A “native” watcher instance that is responsible for managing watchers on
+// various directories.
+//
+// Each `NativeWatcher` can supply file-watcher events for one or more
+// `PathWatcher` instances; those `PathWatcher`s may care about all events in
+// the watched directory, only events that affect a particular child of the
+// directory, or even events that affect a descendant folder or file.
+//
+// We employ some common-sense measures to consolidate watchers when they want
+// to watch similar paths. A `NativeWatcher` will start when a `PathWatcher`
+// first subscribes to it; it will stop when no more `PathWatcher`s are
+// subscribed.
 class NativeWatcher {
   // Holds _active_ `NativeWatcher` instances. A `NativeWatcher` is active if
   // at least one consumer has subscribed to it via `onDidChange`; it becomes
@@ -79,8 +98,16 @@ class NativeWatcher {
     return this.normalizedPath;
   }
 
+  get listenerCount () {
+    return this.emitter.listenerCountForEventName('did-change');
+  }
+
   start () {
     if (this.running) return;
+    if (!fs.existsSync(this.normalizedPath)) {
+      // We can't start a watcher on a path that doesn't exist.
+      return;
+    }
     this.handle = binding.watch(this.normalizedPath);
     NativeWatcher.INSTANCES.set(this.handle, this);
     this.running = true;
@@ -119,13 +146,12 @@ class NativeWatcher {
     return this.emitter.on('did-error', callback);
   }
 
-  reattachTo (replacement, watchedPath, options) {
+  reattachListenersTo (replacement, watchedPath, options) {
     if (replacement === this) return;
     this.emitter.emit('should-detach', { replacement, watchedPath, options });
   }
 
   stop (shutdown = false) {
-    // console.log('Stopping NativeListener', this.handle, this.running);
     if (this.running) {
       this.emitter.emit('will-stop', shutdown);
       binding.unwatch(this.handle);
@@ -134,8 +160,6 @@ class NativeWatcher {
     }
 
     NativeWatcher.INSTANCES.delete(this.handle);
-
-    // console.log('Remaining instances:', NativeWatcher.INSTANCES.size, [...NativeWatcher.INSTANCES.keys()]);
   }
 
   dispose () {
@@ -143,8 +167,6 @@ class NativeWatcher {
   }
 
   onEvent (event) {
-    // console.log('NativeWatcher#onEvent!', event);
-    // console.log('onEvent!', event);
     this.emitter.emit('did-change', event);
   }
 
@@ -153,16 +175,32 @@ class NativeWatcher {
   }
 }
 
-class WatcherError extends Error {
-  constructor(message, code) {
-    super(message);
-    this.name = 'WatcherError';
-    this.code = code;
-  }
-}
-
 let PathWatcherId = 10;
 
+// A class responsible for watching a particular directory or file on the
+// filesystem.
+//
+// A `PathWatcher` is backed by a `NativeWatcher` that is guaranteed to notify
+// it about the events it cares about, and often other events it _doesn’t_ care
+// about; it’s the `PathWatcher`’s job to filter this stream and ignore the
+// irrelevant events.
+//
+// For instance, a `NativeWatcher` can only watch a directory, but a
+// `PathWatcher` can watch a specific file in the directory. In that case, it’s
+// up to the `PathWatcher` to ignore any events that do not pertain to that
+// file.
+//
+// A `PathWatcher` might be asked to switch from one `NativeWatcher` to another
+// after creation. As more `PathWatcher`s are created, and more
+// `NativeWatchers` are created to support them, opportunities for
+// consolidation and reuse might present themselves. For instance, sibling
+// watchers with two different `NativeWatcher`s might trigger the creation of a
+// new `NativeWatcher` pointing to their shared parent directory.
+//
+// In these scenarios, the new `NativeWatcher` is created before the old one is
+// destroyed; the goal is that the switch from one `NativeWatcher` to another
+// is atomic and results in no missed filesystem events. The old watcher will
+// be disposed of once no `PathWatcher`s are listening to it anymore.
 class PathWatcher {
   constructor (registry, watchedPath) {
     this.id = PathWatcherId++;
@@ -176,21 +214,36 @@ class PathWatcher {
     this.emitter = new Emitter();
     this.subs = new CompositeDisposable();
 
+    // NOTE: Right now we have the constraint that we can't watch a path that
+    // doesn't yet exist. This is a long-standing behavior of `pathwatcher` and
+    // would have to be changed carefully if it were changed at all.
     if (!fs.existsSync(watchedPath)) {
       throw new WatcherError('Unable to watch path', 'ENOENT');
     }
 
-    try {
-      this.normalizedPath = fs.realpathSync(watchedPath);
-    } catch (err) {
-      this.normalizedPath = watchedPath;
-    }
+    // Because `pathwatcher` is historically a very synchronous API, you'll see
+    // lots of synchronous `fs` calls in this code. This is done for
+    // backward-compatibility. It's a medium-term goal for us to reduce our
+    // dependence on this library and move its consumers to a file-watcher
+    // contract with an asynchronous API.
+    this.normalizedPath = getRealFilePath(watchedPath);
+    // try {
+    //   this.normalizedPath = fs.realpathSync(watchedPath) ?? watchedPath;
+    // } catch (err) {
+    //   this.normalizedPath = watchedPath;
+    // }
 
-    let stats = fs.statSync(this.normalizedPath);
-    this.isWatchingParent = !stats.isDirectory();
+    // We must watch a directory. If this is a file, we must watch its parent.
+    // If this is a directory, we can watch it directly. This flag helps us
+    // keep track of it.
+    this.isWatchingParent = !isDirectory(this.normalizedPath);
 
+    // `originalNormalizedPath` will always contain the resolved (real path on
+    // disk) file path that we care about.
     this.originalNormalizedPath = this.normalizedPath;
-    if (!stats.isDirectory()) {
+    if (this.isWatchingParent) {
+      // `normalizedPath` will always contain the path to the directory we mean
+      // to watch.
       this.normalizedPath = path.dirname(this.normalizedPath);
     }
 
@@ -215,6 +268,8 @@ class PathWatcher {
   }
 
   onDidChange (callback) {
+    // We don't try to create a native watcher until something subscribes to
+    // our `did-change` events.
     if (this.native) {
       let sub = this.native.onDidChange(event => {
         this.onNativeEvent(event, callback);
@@ -222,6 +277,9 @@ class PathWatcher {
       this.changeCallbacks.set(callback, sub);
       this.native.start();
     } else {
+      // We don't have a native watcher yet, so we’ll ask the registry to
+      // assign one to us. This could be a brand-new instance or one that was
+      // already watching one of our ancestor folders.
       if (this.normalizedPath) {
         this.registry.attach(this);
         this.onDidChange(callback);
@@ -243,6 +301,7 @@ class PathWatcher {
     return this.emitter.on('did-error', callback);
   }
 
+  // Attach a `NativeWatcher` to this `PathWatcher`.
   attachToNative (native) {
     this.subs.dispose();
     this.subs = new CompositeDisposable();
@@ -254,8 +313,6 @@ class PathWatcher {
         native.onDidStart(() => this.resolveStartPromise())
       );
     }
-
-    // console.log('PathWatcher instance with path', this.originalNormalizedPath, 'is attaching to native:', native);
 
     // Transfer any native event subscriptions to the new NativeWatcher.
     for (let [callback, formerSub] of this.changeCallbacks) {
@@ -272,16 +329,29 @@ class PathWatcher {
 
     this.subs.add(
       native.onShouldDetach(({ replacement, watchedPath }) => {
+        // When we close all native watchers, we set this flag; we don't want
+        // it to trigger a flurry of new watcher creation.
         if (isClosingAllWatchers) return;
-        // console.warn('Should PathWatcher with ID', this.id, 'attach to:', replacement, 'when it already has native:', this.native, this.native === replacement);
+
+        // The `NativeWatcher` is telling us that it may shut down; it’s
+        // offering a replacement `NativeWatcher`. We are in charge of whether
+        // we jump ship, though:
+        //
+        // * Are we even watching a path anymore? Maybe this was triggered
+        //   because we called our own `close` method.
+        // * Is it trying to get us to “switch” to the `NativeWatcher` we’re
+        //   already using?
+        // * Sanity check: is this even a `NativeWatcher` we can use?
+        //
+        // Keep in mind that a `NativeWatcher` isn’t doomed to be stopped
+        // unless it has signaled a `will-stop` event. If that hasn’t happened,
+        // then `should-detach` is merely offering a suggestion.
         if (
           this.active &&
           this.native === native &&
           replacement !== native &&
           this.normalizedPath?.startsWith(watchedPath)
         ) {
-          // console.log('PathWatcher with ID:', this.id, 'reattaching to:', replacement, ';\n  the PathWatcher is meant to watch the path:', this.originalNormalizedPath);
-          // console.warn('The current watcher count is', getNativeWatcherCount());
           this.attachToNative(replacement, replacement.normalizedPath);
         }
       })
@@ -515,6 +585,7 @@ class PathWatcher {
   close () {
     this.active = false;
     this.dispose();
+    this.registry.detach(this);
   }
 }
 
@@ -523,6 +594,7 @@ const REGISTRY = new NativeWatcherRegistry((normalizedPath) => {
     binding.setCallback(DEFAULT_CALLBACK);
     initialized = true;
   }
+
   // It's important that this function be able to return an existing instance
   // of `NativeWatcher` when present. Otherwise, the registry will try to
   // create a new instance at the same path, and the native bindings won't

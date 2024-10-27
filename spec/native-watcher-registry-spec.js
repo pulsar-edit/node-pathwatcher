@@ -14,6 +14,8 @@ function findRootDirectory() {
   }
 }
 
+function EMPTY() {}
+
 const ROOT = findRootDirectory();
 
 function absolute(...parts) {
@@ -29,6 +31,7 @@ class MockWatcher {
   constructor(normalizedPath) {
     this.normalizedPath = normalizedPath;
     this.native = null;
+    this.active = true;
   }
 
   getNormalizedPathPromise() {
@@ -47,8 +50,14 @@ class MockWatcher {
         );
       }
       this.native = native;
+      this.native.onDidChange(EMPTY);
       this.native.attached.push(this);
     }
+  }
+
+  stop () {
+    this.active = false;
+    this.native.stopIfNoListeners();
   }
 }
 
@@ -57,15 +66,22 @@ class MockNative {
     this.name = name;
     this.attached = [];
     this.disposed = false;
-    this.stopped = false;
+    this.stopped = true;
+    this.wasListenedTo = false;
 
     this.emitter = new Emitter();
   }
 
-  reattachTo(newNative, nativePath) {
+  reattachListenersTo(newNative, nativePath) {
     for (const watcher of this.attached) {
       watcher.attachToNative(newNative, nativePath);
     }
+  }
+
+  onDidChange (callback) {
+    this.wasListenedTo = true;
+    this.stopped = false;
+    return this.emitter.on('did-change', callback);
   }
 
   onWillStop(callback) {
@@ -76,9 +92,20 @@ class MockNative {
     this.disposed = true;
   }
 
+  get listenerCount () {
+    return this.emitter.listenerCountForEventName('did-change');
+  }
+
+  stopIfNoListeners () {
+    if (this.listenerCount > 0) return;
+    this.stop();
+  }
+
   stop() {
+    console.log('Stopping:', this.name);
     this.stopped = true;
     this.emitter.emit('will-stop');
+    this.dispose();
   }
 }
 
@@ -148,8 +175,11 @@ describe('NativeWatcherRegistry', function() {
     const childDir1 = path.join(parentDir, 'child', 'directory', 'one');
     const otherDir = absolute('another', 'path');
 
+    const expectedCommonDir = path.join(parentDir, 'child', 'directory');
+
     const CHILD0 = new MockNative('existing0');
     const CHILD1 = new MockNative('existing1');
+    const COMMON = new MockNative('commonAncestor');
     const OTHER = new MockNative('existing2');
     const PARENT = new MockNative('parent');
 
@@ -162,37 +192,43 @@ describe('NativeWatcherRegistry', function() {
         return OTHER;
       } else if (dir === parentDir) {
         return PARENT;
+      } else if (dir === expectedCommonDir) {
+        return COMMON;
       } else {
         throw new Error(`Unexpected path: ${dir}`);
       }
     };
 
+    // With only one watcher, we expect it to be CHILD0.
     const watcher0 = new MockWatcher(childDir0);
     await registry.attach(watcher0);
+    expect(watcher0.native).toBe(CHILD0);
 
+    // When we add another watcher at a sibling path, we expect them to unify
+    // under a common watcher on their closest ancestor.
     const watcher1 = new MockWatcher(childDir1);
     await registry.attach(watcher1);
+    expect(watcher1.native).toBe(COMMON);
+    expect(CHILD0.stopped).toBe(true);
 
     const watcher2 = new MockWatcher(otherDir);
     await registry.attach(watcher2);
-
-    expect(watcher0.native).toBe(CHILD0);
-    expect(watcher1.native).toBe(CHILD1);
     expect(watcher2.native).toBe(OTHER);
 
-    // Consolidate all three watchers beneath the same native watcher on the parent directory
+    // Consolidate all three watchers beneath the same native watcher on the
+    // parent directory.
     const watcher = new MockWatcher(parentDir);
     await registry.attach(watcher);
-
     expect(watcher.native).toBe(PARENT);
-
     expect(watcher0.native).toBe(PARENT);
+
     expect(CHILD0.stopped).toBe(true);
     expect(CHILD0.disposed).toBe(true);
 
     expect(watcher1.native).toBe(PARENT);
+    // CHILD1 should never have been used.
     expect(CHILD1.stopped).toBe(true);
-    expect(CHILD1.disposed).toBe(true);
+    expect(CHILD1.wasListenedTo).toBe(false);
 
     expect(watcher2.native).toBe(OTHER);
     expect(OTHER.stopped).toBe(false);
@@ -200,7 +236,7 @@ describe('NativeWatcherRegistry', function() {
   });
 
   describe('removing NativeWatchers', function() {
-    it('happens when they stop', async function() {
+    it('happens when nothing is subscribed to them', async function() {
       const STOPPED = new MockNative('stopped');
       const RUNNING = new MockNative('running');
 
@@ -212,9 +248,7 @@ describe('NativeWatcherRegistry', function() {
         'watcher',
         'that',
         'will',
-        'continue',
-        'to',
-        'exist'
+        'be'
       );
       const runningPathParts = runningPath
         .split(path.sep)
@@ -236,21 +270,26 @@ describe('NativeWatcherRegistry', function() {
       const runningWatcher = new MockWatcher(runningPath);
       await registry.attach(runningWatcher);
 
-      STOPPED.stop();
+      stoppedWatcher.stop();
+      registry.detach(stoppedWatcher);
 
       const runningNode = registry.tree.root.lookup(runningPathParts).when({
         parent: node => node,
         missing: () => false,
         children: () => false
       });
+
       expect(runningNode).toBeTruthy();
       expect(runningNode.getNativeWatcher()).toBe(RUNNING);
 
+      // Either of the `parent` or `missing` outcomes would be fine here as
+      // long as the exact node doesn't exist.
       const stoppedNode = registry.tree.root.lookup(stoppedPathParts).when({
-        parent: () => false,
+        parent: (_, remaining) => remaining.length > 0,
         missing: () => true,
         children: () => false
       });
+
       expect(stoppedNode).toBe(true);
     });
 
@@ -291,7 +330,8 @@ describe('NativeWatcherRegistry', function() {
       expect(childWatcher1.native).toBe(PARENT);
 
       // Stopping the parent should detach and recreate the child watchers.
-      PARENT.stop();
+      parentWatcher.stop();
+      registry.detach(parentWatcher);
 
       expect(childWatcher0.native).toBe(CHILD0);
       expect(childWatcher1.native).toBe(CHILD1);
@@ -356,7 +396,8 @@ describe('NativeWatcherRegistry', function() {
 
       // Stopping the parent should detach and create the child watchers. Both child watchers should
       // share the same native watcher.
-      PARENT.stop();
+      parentWatcher.stop();
+      registry.detach(parentWatcher);
 
       expect(childWatcher0.native).toBe(CHILD0);
       expect(childWatcher1.native).toBe(CHILD0);

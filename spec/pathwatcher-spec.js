@@ -169,6 +169,91 @@ describe('PathWatcher', () => {
     });
   });
 
+  describe('when two watchers are added on sibling directories', () => {
+    let siblingA = path.join(tempDir, 'sibling-a');
+    let siblingB = path.join(tempDir, 'sibling-b');
+
+    beforeEach(() => {
+      for (let subDir of [siblingA, siblingB]) {
+        if (!fs.existsSync(subDir)) {
+          fs.mkdirSync(subDir, { recursive: true });
+        }
+      }
+      siblingA = fs.realpathSync(siblingA);
+      siblingB = fs.realpathSync(siblingB);
+    });
+
+    afterEach(() => {
+      for (let subDir of [siblingA, siblingB]) {
+        if (fs.existsSync(subDir)) {
+          fs.rmSync(subDir, { recursive: true });
+        }
+      }
+    });
+
+    it('should consolidate them into one watcher on the parent', async () => {
+      let watchCallback = jasmine.createSpy('watch-callback');
+      let watcherA = PathWatcher.watch(siblingA, watchCallback);
+      await wait(100);
+      expect(watcherA.native.path).toBe(siblingA);
+      let watcherB = PathWatcher.watch(siblingB, watchCallback);
+      await wait(100);
+      expect(watcherB.native.path).toBe(path.dirname(siblingB));
+      expect(PathWatcher.getNativeWatcherCount()).toBe(1);
+    });
+  });
+
+  describe('when two watchers are added on cousin directories', () => {
+    let cousinA = path.join(tempDir, 'placeholder-a', 'cousin-a');
+    let cousinB = path.join(tempDir, 'placeholder-b', 'cousin-b');
+
+    beforeEach(() => {
+      for (let subDir of [cousinA, cousinB]) {
+        if (!fs.existsSync(subDir)) {
+          fs.mkdirSync(subDir, { recursive: true });
+        }
+      }
+      cousinA = fs.realpathSync(cousinA);
+      cousinB = fs.realpathSync(cousinB);
+    });
+
+    afterEach(() => {
+      for (let subDir of [cousinA, cousinB]) {
+        if (fs.existsSync(subDir)) {
+          fs.rmSync(path.dirname(subDir), { recursive: true });
+        }
+      }
+    });
+
+    it('should consolidate them into one watcher on the grandparent', async () => {
+      let watchCallbackA = jasmine.createSpy('watch-callback-a');
+      let watchCallbackB = jasmine.createSpy('watch-callback-b');
+      let watcherA = PathWatcher.watch(cousinA, watchCallbackA);
+      await wait(100);
+      expect(watcherA.native.path).toBe(cousinA);
+      let watcherB = PathWatcher.watch(cousinB, watchCallbackB);
+      await wait(100);
+      expect(watcherB.native.path).toBe(fs.realpathSync(tempDir));
+
+      expect(PathWatcher.getNativeWatcherCount()).toBe(1);
+
+      fs.writeFileSync(path.join(cousinA, 'file'), 'test');
+      await condition(() => watchCallbackA.calls.count() > 0);
+      expect(watchCallbackB.calls.count()).toBe(0);
+      watchCallbackA.calls.reset();
+
+      fs.writeFileSync(path.join(cousinB, 'file'), 'test');
+      await condition(() => watchCallbackB.calls.count() > 0);
+      expect(watchCallbackA.calls.count()).toBe(0);
+
+      // When we close `watcherB`, that's our opportunity to move the watcher closer to `watcherA`.
+      watcherB.close();
+      await wait(100);
+
+      expect(watcherA.native.path).toBe(cousinA);
+    });
+  });
+
   describe('when a file under a watched directory is deleted', () => {
     it('fires the callback with the change event and empty path', async () => {
       let fileUnderDir = path.join(tempDir, 'file');
