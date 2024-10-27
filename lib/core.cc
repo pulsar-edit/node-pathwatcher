@@ -141,7 +141,7 @@ void PathWatcherListener::Stop() {
   isShuttingDown = true;
 }
 
-void PathWatcherListener::Stop(efsw::FileWatcher* fileWatcher) {
+void PathWatcherListener::Stop(FileWatcher* fileWatcher) {
   for (auto& it : paths) {
     fileWatcher->removeWatch(it.first);
   }
@@ -366,9 +366,13 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
 
     listener = new PathWatcherListener(env, tsfn);
 
-    fileWatcher = new efsw::FileWatcher();
-    fileWatcher->followSymlinks(true);
-    fileWatcher->watch();
+#ifdef __APPLE__
+  fileWatcher = new FSEventsFileWatcher();
+#else
+  fileWatcher = new efsw::FileWatcher();
+  fileWatcher->followSymlinks(true);
+  fileWatcher->watch();
+#endif
 
     isWatching = true;
   }

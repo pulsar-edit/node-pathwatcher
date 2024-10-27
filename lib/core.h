@@ -7,6 +7,10 @@
 #include <unordered_map>
 #include "../vendor/efsw/include/efsw/efsw.hpp"
 
+#ifdef __APPLE__
+#include "./platform/FSEventsFileWatcher.hpp"
+#endif
+
 #ifndef _WIN32
 #include <sys/time.h>
 #endif
@@ -15,6 +19,12 @@
 #define PATH_SEPARATOR '\\'
 #else
 #define PATH_SEPARATOR '/'
+#endif
+
+#ifdef __APPLE__
+typedef FSEventsFileWatcher FileWatcher;
+#else
+typedef efsw::FileWatcher FileWatcher;
 #endif
 
 typedef efsw::WatchID WatcherHandle;
@@ -103,7 +113,7 @@ public:
   void RemovePath(efsw::WatchID handle);
   bool IsEmpty();
   void Stop();
-  void Stop(efsw::FileWatcher* fileWatcher);
+  void Stop(FileWatcher* fileWatcher);
 
 private:
   std::atomic<bool> isShuttingDown{false};
@@ -138,5 +148,6 @@ private:
   Napi::FunctionReference callback;
   Napi::ThreadSafeFunction tsfn;
   PathWatcherListener* listener;
-  efsw::FileWatcher* fileWatcher = nullptr;
+
+  FileWatcher* fileWatcher = nullptr;
 };

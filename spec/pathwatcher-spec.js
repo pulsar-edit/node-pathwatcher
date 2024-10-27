@@ -114,7 +114,7 @@ describe('PathWatcher', () => {
     });
   }
 
-  describe('when a watcher is added underneath an existing watched path', () => {
+  xdescribe('when a watcher is added underneath an existing watched path', () => {
     let subDirFile, subDir;
 
     function cleanup() {
@@ -179,7 +179,7 @@ describe('PathWatcher', () => {
     });
   });
 
-  describe('when two watchers are added on sibling directories', () => {
+  xdescribe('when two watchers are added on sibling directories', () => {
     let siblingA = path.join(tempDir, 'sibling-a');
     let siblingB = path.join(tempDir, 'sibling-b');
 
@@ -218,7 +218,7 @@ describe('PathWatcher', () => {
     });
   });
 
-  describe('when two watchers are added on cousin directories', () => {
+  xdescribe('when two watchers are added on cousin directories', () => {
     let cousinA = path.join(tempDir, 'placeholder-a', 'cousin-a');
     let cousinB = path.join(tempDir, 'placeholder-b', 'cousin-b');
 

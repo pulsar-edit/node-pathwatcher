@@ -119,6 +119,11 @@
         "vendor/efsw",
       ],
       "conditions": [
+        ['OS=="mac"', {
+          "sources+": [
+            "lib/platform/FSEventsFileWatcher.cpp"
+          ]
+        }],
         ['OS=="win"', {
           'msvs_settings': {
             'VCCLCompilerTool': {

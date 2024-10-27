@@ -13,7 +13,7 @@ let binding;
 const fs = require('fs');
 const path = require('path');
 const { Emitter, Disposable, CompositeDisposable } = require('event-kit');
-const { NativeWatcherRegistry } = require('./native-watcher-registry');
+// const { NativeWatcherRegistry } = require('./native-watcher-registry');
 
 let initialized = false;
 
@@ -146,11 +146,6 @@ class NativeWatcher {
     return this.emitter.on('did-error', callback);
   }
 
-  reattachListenersTo (replacement, watchedPath, options) {
-    if (replacement === this) return;
-    this.emitter.emit('should-detach', { replacement, watchedPath, options });
-  }
-
   stop (shutdown = false) {
     if (this.running) {
       this.emitter.emit('will-stop', shutdown);
@@ -202,10 +197,9 @@ let PathWatcherId = 10;
 // is atomic and results in no missed filesystem events. The old watcher will
 // be disposed of once no `PathWatcher`s are listening to it anymore.
 class PathWatcher {
-  constructor (registry, watchedPath) {
+  constructor (watchedPath) {
     this.id = PathWatcherId++;
     this.watchedPath = watchedPath;
-    this.registry = registry;
 
     this.normalizePath = null;
     this.native = null;
@@ -280,14 +274,8 @@ class PathWatcher {
       // We don't have a native watcher yet, so we’ll ask the registry to
       // assign one to us. This could be a brand-new instance or one that was
       // already watching one of our ancestor folders.
-      if (this.normalizedPath) {
-        this.registry.attach(this);
-        this.onDidChange(callback);
-      } else {
-        this.registry.attachAsync(this).then(() => {
-          this.onDidChange(callback);
-        })
-      }
+      this.native = NativeWatcher.findOrCreate(this.normalizedPath);
+      this.onDidChange(callback);
     }
 
     return new Disposable(() => {
@@ -384,7 +372,7 @@ class PathWatcher {
       this.normalizedPath = path.dirname(this.normalizedPath);
     }
 
-    this.registry.attach(this);
+    this.native = NativeWatcher.findOrCreate(this.normalizedPath);
     this.active = true;
   }
 
@@ -585,120 +573,8 @@ class PathWatcher {
   close () {
     this.active = false;
     this.dispose();
-    this.registry.detach(this);
   }
 }
-
-function getDefaultRegistryOptionsForPlatform (platform) {
-  switch (platform) {
-    case 'linux':
-      // On Linux, `efsw`’s strategy for a recursive watcher is to recursively
-      // watch each folder underneath the tree and call `inotify_add_watch` for
-      // each one. This is a far more “wasteful” strategy than the one we’d be
-      // trying to avoid by reusing native watchers in the first place!
-      //
-      // Hence, on Linux, all these options are disabled. More non-recursive
-      // `NativeWatcher`s are better than fewer recursive `NativeWatcher`s.
-      return {
-        reuseAncestorWatchers: false,
-        relocateDescendantWatchers: false,
-        relocateAncestorWatchers: false,
-        mergeWatchersWithCommonAncestors: false
-      };
-    case 'win32':
-      return {
-        reuseAncestorWatchers: false,
-        relocateDescendantWatchers: false,
-        relocateAncestorWatchers: false,
-        mergeWatchersWithCommonAncestors: false
-      };
-    case 'darwin':
-      // On macOS, the `FSEvents` API is a godsend in a number of ways. But
-      // there’s a big caveat: `fseventsd` allows only a fixed number of
-      // “clients” (currently 1024) _system-wide_ and attempts to add more will
-      // fail.
-      //
-      // Each `NativeWatcher` counts as a single “client” for these purposes,
-      // making it extremely plausible for us to use hundreds of these clients
-      // on our own. Each `FSEvents` stream can watch any number of arbitrary
-      // paths on the filesystem, but `efsw` doesn’t approach it that way, and
-      // any change to that list of paths would involve stopping one watcher
-      // and creating another. `efsw` currently doesn’t do this, though it’d be
-      // nice if they did in the future.
-      //
-      // That aside, the biggest thing we’ve got going for us is that
-      // `FSEvents` streams are natively recursive. That makes it easier to
-      // reuse `NativeWatcher`s; a watcher on an ancestor can be reused on a
-      // descendant, for instance. And `fseventsd`’s hard upper limit on
-      // watchers makes it worth the tradeoff here.
-      return {
-        reuseAncestorWatchers: true,
-        relocateDescendantWatchers: false,
-        relocateAncestorWatchers: true,
-        mergeWatchersWithCommonAncestors: true,
-        maxCommonAncestorLevel: 2
-      };
-    default:
-      return {
-        reuseAncestorWatchers: true,
-        relocateDescendantWatchers: false,
-        relocateAncestorWatchers: true,
-        mergeWatchersWithCommonAncestors: false
-      };
-  }
-}
-
-function registryOptionsToNativeWatcherOptions(registryOptions) {
-  let recursive = false;
-  // Any of the following options put us into a mode where we try to
-  // consolidate and reuse native watchers. For this to be feasible (beyond two
-  // `PathWatcher`s sharing a `NativeWatcher` because they care about the same
-  // directory) requires that we set up a recursive watcher.
-  //
-  // On some platforms, this strategy doesn’t make sense, and it’s better to
-  // use a different `NativeWatcher` for each directory.
-  let {
-    reuseAncestorWatchers,
-    relocateAncestorWatchers,
-    relocateDescendantWatchers,
-    mergeWatchersWithCommonAncestors
-  } = registryOptions;
-  if (
-    relocateAncestorWatchers ||
-    relocateDescendantWatchers ||
-    reuseAncestorWatchers ||
-    mergeWatchersWithCommonAncestors
-  ) {
-    recursive = true;
-  }
-
-  return { recursive };
-}
-
-const REGISTRY = new NativeWatcherRegistry(
-  (normalizedPath, registryOptions) => {
-    if (!initialized) {
-      binding.setCallback(DEFAULT_CALLBACK);
-      initialized = true;
-    }
-
-    // It's important that this function be able to return an existing instance
-    // of `NativeWatcher` when present. Otherwise, the registry will try to
-    // create a new instance at the same path, and the native bindings won't
-    // allow that to happen.
-    //
-    // It's also important because the registry might respond to a sibling
-    // `PathWatcher`’s removal by trying to reattach us — even though our
-    // `NativeWatcher` still works just fine. The way around that is to make sure
-    // that this function will return the same watcher we're already using
-    // instead of creating a new one.
-    return NativeWatcher.findOrCreate(
-      normalizedPath,
-      registryOptionsToNativeWatcherOptions(registryOptions)
-    );
-  },
-  getDefaultRegistryOptionsForPlatform(process.platform)
-);
 
 class WatcherEvent {
   constructor(event, filePath, oldFilePath) {
@@ -725,7 +601,7 @@ function watch (pathToWatch, callback) {
     binding.setCallback(DEFAULT_CALLBACK);
     initialized = true;
   }
-  let watcher = new PathWatcher(REGISTRY, path.resolve(pathToWatch));
+  let watcher = new PathWatcher(path.resolve(pathToWatch));
   watcher.onDidChange(callback);
   return watcher;
 }
@@ -737,7 +613,6 @@ function closeAllWatchers () {
     watcher.stop(true);
   }
   NativeWatcher.INSTANCES.clear();
-  REGISTRY.reset();
   isClosingAllWatchers = false;
 }
 
