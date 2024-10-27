@@ -158,7 +158,13 @@ describe('PathWatcher', () => {
       await condition(() => subDirCallback.calls.count() >= 1);
 
       let realTempDir = fs.realpathSync(tempDir);
-      expect(PathWatcher.getWatchedPaths()).toEqual([realTempDir]);
+      expect(
+        PathWatcher.getWatchedPaths()
+      ).toEqual(
+        shouldConsolidate ?
+          [realTempDir] :
+          [realTempDir, fs.realpathSync(subDir)]
+      );
 
       // Closing the original watcher should not cause the native watcher to
       // close, since another one is depending on it.
