@@ -1,7 +1,20 @@
 #include "../core.h"
 #include <sys/stat.h>
-#include <iostream>
 #include "FSEventsFileWatcher.hpp"
+
+#ifdef DEBUG
+#include <iostream>
+#endif
+
+// This is an API-compatible replacement for `efsw::FileWatcher` on macOS. It
+// uses its own implementation of `FSEvents` so it can minimize the number of
+// streams created in comparison to `efsw`’s approach of using one stream per
+// watched path.
+
+// NOTE: Lots of these are duplications and alternate versions of functions
+// that are already present in `efsw`. We could use the `efsw` versions
+// instead, but it feels like a good idea to minimize the amount of
+// cross-pollination here.
 
 int shorthandFSEventsModified = kFSEventStreamEventFlagItemFinderInfoMod |
   kFSEventStreamEventFlagItemModified |
@@ -101,19 +114,26 @@ static std::string convertCFStringToStdString( CFStringRef cfString ) {
 	// Try to get the C string pointer directly
 	const char* cStr = CFStringGetCStringPtr( cfString, kCFStringEncodingUTF8 );
 
-	if ( cStr ) {
-		// If the pointer is valid, directly return a std::string from it
-		return std::string( cStr );
+	if (cStr) {
+    // If the pointer is valid, directly return a `std::string` from it.
+		return std::string(cStr);
 	} else {
-		// If not, manually convert it
-		CFIndex length = CFStringGetLength( cfString );
-		CFIndex maxSize = CFStringGetMaximumSizeForEncoding( length, kCFStringEncodingUTF8 ) +
-						  1; // +1 for null terminator
+    // If not, manually convert it.
+		CFIndex length = CFStringGetLength(cfString);
+		CFIndex maxSize = CFStringGetMaximumSizeForEncoding(
+      length,
+      kCFStringEncodingUTF8
+    ) + 1; // +1 for null terminator
 
 		char* buffer = new char[maxSize];
 
-		if ( CFStringGetCString( cfString, buffer, maxSize, kCFStringEncodingUTF8 ) ) {
-			std::string result( buffer );
+		if (CFStringGetCString(
+      cfString,
+      buffer,
+      maxSize,
+      kCFStringEncodingUTF8
+    )) {
+			std::string result(buffer);
 			delete[] buffer;
 			return result;
 		} else {
@@ -123,11 +143,19 @@ static std::string convertCFStringToStdString( CFStringRef cfString ) {
 	}
 }
 
+// Empty constructor.
 
 FSEventsFileWatcher::~FSEventsFileWatcher() {
 #ifdef DEBUG
   std::cout << "[destroying] FSEventsFileWatcher!" << std::endl;
 #endif
+  pendingDestruction = true;
+  // Defer cleanup until we can finish processing file events.
+  std::unique_lock<std::mutex> lock(processingMutex);
+  while (isProcessing) {
+    processingComplete.wait(lock);
+  }
+
   isValid = false;
   if (currentEventStream) {
     FSEventStreamStop(currentEventStream);
@@ -139,89 +167,23 @@ FSEventsFileWatcher::~FSEventsFileWatcher() {
 efsw::WatchID FSEventsFileWatcher::addWatch(
   const std::string& directory,
   efsw::FileWatchListener* listener,
+  // The `_useRecursion` flag is ignored; it's present for API compatibility.
   bool _useRecursion
 ) {
 #ifdef DEBUG
   std::cout << "FSEventsFileWatcher::addWatch" << directory << std::endl;
 #endif
-  auto handle = nextHandleID++;
-  handlesToPaths.insert(handle, directory);
-  std::vector<CFStringRef> cfStrings;
-  for (const auto& pair: handlesToPaths.forward) {
-    CFStringRef cfStr = CFStringCreateWithCString(
-      kCFAllocatorDefault,
-      pair.second.c_str(),
-      kCFStringEncodingUTF8
-    );
-    if (cfStr) {
-      cfStrings.push_back(cfStr);
-    }
-  }
+  efsw::WatchID handle = nextHandleID++;
+  handlesToPaths[handle] = directory;
+  handlesToListeners[handle] = listener;
 
-  CFArrayRef paths = CFArrayCreate(
-    NULL,
-    reinterpret_cast<const void**>(cfStrings.data()),
-    cfStrings.size(),
-    NULL
-  );
-
-  uint32_t streamFlags = kFSEventStreamCreateFlagNone;
-
-  streamFlags = kFSEventStreamCreateFlagFileEvents |
-    kFSEventStreamCreateFlagNoDefer |
-    kFSEventStreamCreateFlagUseExtendedData |
-    kFSEventStreamCreateFlagUseCFTypes;
-
-  FSEventStreamContext ctx;
-  ctx.version = 0;
-  ctx.info = this;
-  ctx.retain = NULL;
-  ctx.release = NULL;
-  ctx.copyDescription = NULL;
-
-  dispatch_queue_t queue = dispatch_queue_create(NULL, NULL);
-
-  nextEventStream = FSEventStreamCreate(
-    kCFAllocatorDefault,
-    &FSEventsFileWatcher::FSEventCallback,
-    &ctx,
-    paths,
-    kFSEventStreamEventIdSinceNow,
-    0.,
-    streamFlags
-  );
-
-  FSEventStreamSetDispatchQueue(nextEventStream, queue);
-  bool didStart = FSEventStreamStart(nextEventStream);
-
-  for (CFStringRef str : cfStrings) {
-    CFRelease(str);
-  }
-  CFRelease(paths);
+  bool didStart = startNewStream();
 
   if (!didStart) {
-    handlesToPaths.remove(handle);
+    removeHandle(handle);
     // TODO: Debug information?
     return -handle;
-  } else {
-#ifdef DEBUG
-    std::cout << "Started stream!" << std::endl;
-#endif
-    // Successfully started — we can make it the new event stream and stop the
-    // old one.
-    if (currentEventStream) {
-      FSEventStreamStop(currentEventStream);
-      FSEventStreamInvalidate(currentEventStream);
-      FSEventStreamRelease(currentEventStream);
-#ifdef DEBUG
-    std::cout << "Stopped old stream!" << std::endl;
-#endif
-    }
-    currentEventStream = nextEventStream;
-    nextEventStream = nullptr;
   }
-
-  handlesToListeners[handle] = listener;
 
   return handle;
 }
@@ -232,10 +194,9 @@ void FSEventsFileWatcher::removeWatch(
 #ifdef DEBUG
   std::cout << "FSEventsFileWatcher::removeWatch" << handle << std::endl;
 #endif
-  handlesToPaths.remove(handle);
+  removeHandle(handle);
 
-  if (handlesToPaths.forward.size() == 0) {
-    handlesToListeners.erase(handle);
+  if (handlesToPaths.size() == 0) {
     if (currentEventStream) {
       FSEventStreamStop(currentEventStream);
       FSEventStreamInvalidate(currentEventStream);
@@ -245,78 +206,12 @@ void FSEventsFileWatcher::removeWatch(
     return;
   }
 
-  std::vector<CFStringRef> cfStrings;
-  for (const auto& pair: handlesToPaths.forward) {
-    CFStringRef cfStr = CFStringCreateWithCString(
-      kCFAllocatorDefault,
-      pair.second.c_str(),
-      kCFStringEncodingUTF8
-    );
-    if (cfStr) {
-      cfStrings.push_back(cfStr);
-    }
-  }
-
-  CFArrayRef paths = CFArrayCreate(
-    NULL,
-    reinterpret_cast<const void**>(cfStrings.data()),
-    cfStrings.size(),
-    NULL
-  );
-
-  uint32_t streamFlags = kFSEventStreamCreateFlagNone;
-
-  streamFlags = kFSEventStreamCreateFlagFileEvents |
-    kFSEventStreamCreateFlagNoDefer |
-    kFSEventStreamCreateFlagUseExtendedData |
-    kFSEventStreamCreateFlagUseCFTypes;
-
-  FSEventStreamContext ctx;
-  ctx.version = 0;
-  ctx.info = this;
-  ctx.retain = NULL;
-  ctx.release = NULL;
-  ctx.copyDescription = NULL;
-
-  dispatch_queue_t queue = dispatch_queue_create(NULL, NULL);
-
-  nextEventStream = FSEventStreamCreate(
-    kCFAllocatorDefault,
-    &FSEventsFileWatcher::FSEventCallback,
-    &ctx,
-    paths,
-    kFSEventStreamEventIdSinceNow,
-    0.,
-    streamFlags
-  );
-
-  FSEventStreamSetDispatchQueue(nextEventStream, queue);
-  bool didStart = FSEventStreamStart(nextEventStream);
-
-  for (CFStringRef str : cfStrings) {
-    CFRelease(str);
-  }
-  CFRelease(paths);
-
-  // auto it = handlesToListeners.find(handle);
-  // if (it != handlesToListeners.end()) {
-  //   handlesToListeners.erase(it);
-  // }
-
-  handlesToListeners.erase(handle);
-
-  if (!didStart) {
-    // We'll still remove the listener. Weird that the stream didn't stop, but
-    // we can at least ignore any resulting FSEvents.
-  } else {
-    if (currentEventStream) {
-      FSEventStreamStop(currentEventStream);
-      FSEventStreamInvalidate(currentEventStream);
-      FSEventStreamRelease(currentEventStream);
-    }
-    currentEventStream = nextEventStream;
-    nextEventStream = nullptr;
-  }
+  // We don't capture the return value here because it doesn’t affect our
+  // response. If a new stream fails to start for whatever reason, the old
+  // stream will still work. And because we've removed the handle from the
+  // relevant maps, we will silently ignore any filesystem events that happen
+  // at the given path.
+  startNewStream();
 }
 
 void FSEventsFileWatcher::FSEventCallback(
@@ -362,6 +257,7 @@ void FSEventsFileWatcher::FSEventCallback(
     }
   }
 
+  if (!instance->isValid) return;
   instance->handleActions(events);
   instance->process();
 }
@@ -407,7 +303,7 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
     std::string path;
     bool found = false;
 
-    for (const auto& pair: handlesToPaths.forward) {
+    for (const auto& pair: handlesToPaths) {
       std::string normalizedPath = NormalizePath(pair.second);
       if (!PathStartsWith(event.path, pair.second)) continue;
       if (event.path.find_last_of(PATH_SEPARATOR) != pair.second.size()) {
@@ -519,18 +415,49 @@ void FSEventsFileWatcher::handleAddModDel(
   }
 }
 
-void FSEventsFileWatcher::process() {
-  std::lock_guard<std::mutex> lock(dirsChangedMutex);
-  std::set<std::string>::iterator it = dirsChanged.begin();
-  for (; it != dirsChanged.end(); it++) {
+void FSEventsFileWatcher::removeHandle(efsw::WatchID handle) {
+  auto itp = handlesToPaths.find(handle);
+  if (itp != handlesToPaths.end()) {
+    handlesToPaths.erase(itp);
+  }
+  auto itl = handlesToListeners.find(handle);
+  if (itl != handlesToListeners.end()) {
+    handlesToListeners.erase(itl);
+  }
+}
 
-    std::string dir = *it;
+void FSEventsFileWatcher::process() {
+#ifdef DEBUG
+  std::cout << "FSEventsFileWatcher::process?" << std::endl;
+#endif
+
+  if (!isValid || pendingDestruction) return;
+  {
+    std::unique_lock<std::mutex> lock(processingMutex);
+    if (isProcessing) return;
+    isProcessing = true;
+  }
+
+  ProcessingGuard guard(*this);
+
+  std::set<std::string> dirsCopy;
+  {
+    dirsCopy = dirsChanged;
+    dirsChanged.clear();
+  }
+
+  // Process the copied directories
+  for (const auto& dir : dirsCopy) {
+    if (pendingDestruction) return;
+#ifdef DEBUG
+    std::cout << "Changed:" << dir << std::endl;
+#endif
 
     efsw::WatchID handle;
     std::string path;
     bool found = false;
 
-    for (const auto& pair: handlesToPaths.forward) {
+    for (const auto& pair: handlesToPaths) {
       // std::string normalizedPath = NormalizePath(pair.second);
       if (!PathStartsWith(dir, pair.second)) continue;
       if (dir.find_last_of(PATH_SEPARATOR) != pair.second.size()) {
@@ -549,7 +476,81 @@ void FSEventsFileWatcher::process() {
       FileNameFromPath(dir),
       efsw::Actions::Modified
     );
+
+    if (pendingDestruction) return;
   }
 
   dirsChanged.clear();
+}
+
+bool FSEventsFileWatcher::startNewStream() {
+  // Build a list of all current watched paths. We'll eventually pass this to
+  // `FSEventStreamCreate`.
+  std::vector<CFStringRef> cfStrings;
+  for (const auto& pair : handlesToPaths) {
+    CFStringRef cfStr = CFStringCreateWithCString(
+      kCFAllocatorDefault,
+      pair.second.c_str(),
+      kCFStringEncodingUTF8
+    );
+    if (cfStr) {
+      cfStrings.push_back(cfStr);
+    }
+  }
+
+  CFArrayRef paths = CFArrayCreate(
+    NULL,
+    reinterpret_cast<const void**>(cfStrings.data()),
+    cfStrings.size(),
+    NULL
+  );
+
+  uint32_t streamFlags = kFSEventStreamCreateFlagNone;
+
+  streamFlags = kFSEventStreamCreateFlagFileEvents |
+    kFSEventStreamCreateFlagNoDefer |
+    kFSEventStreamCreateFlagUseExtendedData |
+    kFSEventStreamCreateFlagUseCFTypes;
+
+  FSEventStreamContext ctx;
+  ctx.version = 0;
+  ctx.info = this;
+  ctx.retain = NULL;
+  ctx.release = NULL;
+  ctx.copyDescription = NULL;
+
+  dispatch_queue_t queue = dispatch_queue_create(NULL, NULL);
+
+  nextEventStream = FSEventStreamCreate(
+    kCFAllocatorDefault,
+    &FSEventsFileWatcher::FSEventCallback,
+    &ctx,
+    paths,
+    kFSEventStreamEventIdSinceNow,
+    0.,
+    streamFlags
+  );
+
+  FSEventStreamSetDispatchQueue(nextEventStream, queue);
+  bool didStart = FSEventStreamStart(nextEventStream);
+
+  // Release all the strings we just created.
+  for (CFStringRef str : cfStrings) {
+    CFRelease(str);
+  }
+  CFRelease(paths);
+
+  // If it started successfully, we can swap it into place as the new main
+  // stream.
+  if (didStart) {
+    if (currentEventStream) {
+      FSEventStreamStop(currentEventStream);
+      FSEventStreamInvalidate(currentEventStream);
+      FSEventStreamRelease(currentEventStream);
+    }
+    currentEventStream = nextEventStream;
+    nextEventStream = nullptr;
+  }
+
+  return didStart;
 }

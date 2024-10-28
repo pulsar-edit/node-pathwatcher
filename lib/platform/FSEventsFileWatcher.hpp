@@ -9,37 +9,6 @@
 #include <CoreServices/CoreServices.h>
 #include "../../vendor/efsw/include/efsw/efsw.hpp"
 
-template <typename K, typename V>
-class BidirectionalMap {
-
-public:
-  void insert(const K& key, const V& value) {
-    forward[key] = value;
-    reverse[value] = key;
-  }
-
-  void remove(const K& key) {
-    auto it = forward.find(key);
-    if (it != forward.end()) {
-      reverse.erase(it->second);
-      forward.erase(it);
-    }
-  }
-
-  const V* getValue(const K& key) const {
-    auto it = forward.find(key);
-    return it != forward.end() ? &it->second : nullptr;
-  }
-
-  const K* getKey(const V& value) const {
-    auto it = reverse.find(value);
-    return it != reverse.end() ? &it->second : nullptr;
-  }
-
-  std::unordered_map<K, V> forward;
-  std::unordered_map<V, K> reverse;
-};
-
 class FSEvent {
 public:
   FSEvent(
@@ -103,7 +72,27 @@ public:
   bool isValid = true;
 
 private:
+  // RAII guard to ensure we un-mark our “processing” flag if we're destroyed
+  // during processing.
+  class ProcessingGuard {
+    FSEventsFileWatcher& watcher;
+  public:
+    ProcessingGuard(FSEventsFileWatcher& w) : watcher(w) {}
+    ~ProcessingGuard() {
+      std::unique_lock<std::mutex> lock(watcher.processingMutex);
+      watcher.isProcessing = false;
+      watcher.processingComplete.notify_all();
+    }
+  };
+
+  void removeHandle(efsw::WatchID handle);
+  bool startNewStream();
+
   long nextHandleID;
+  std::atomic<bool> isProcessing{false};
+  std::atomic<bool> pendingDestruction{false};
+  std::mutex processingMutex;
+  std::condition_variable processingComplete;
 
   // The running event stream that subscribes to all the paths we care about.
   FSEventStreamRef currentEventStream = nullptr;
@@ -112,8 +101,7 @@ private:
   FSEventStreamRef nextEventStream = nullptr;
 
   std::set<std::string> dirsChanged;
-  std::mutex dirsChangedMutex;
 
-  BidirectionalMap<efsw::WatchID, std::string> handlesToPaths;
+  std::unordered_map<efsw::WatchID, std::string> handlesToPaths;
   std::unordered_map<efsw::WatchID, efsw::FileWatchListener*> handlesToListeners;
 };
