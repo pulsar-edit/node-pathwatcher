@@ -385,6 +385,7 @@ class PathWatcher {
     // );
 
     let isWatchedPath = (eventPath) => {
+      if (eventPath === this.normalizedPath) return true;
       return eventPath?.startsWith(sep(this.normalizedPath));
     }
 
