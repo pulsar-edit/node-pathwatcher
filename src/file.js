@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const Path = require('path');
 const { Emitter, Disposable } = require('event-kit');
+const _ = require('underscore-plus');
 const FS = require('fs-plus');
 const Grim = require('grim');
 
@@ -473,8 +474,10 @@ class File {
     switch (eventType) {
       case 'delete':
         this.unsubscribeFromNativeChangeEvents();
-        await wait(50);
-        await this.detectResurrection();
+        // We could just `await wait(50)` here, but this method exists so that
+        // we can monkeypatch it in the Pulsar specs and prevent it from going
+        // async.
+        this.detectResurrectionAfterDelay();
         return;
       case 'rename':
         this.setPath(eventPath);
@@ -488,6 +491,10 @@ class File {
         this.cachedContents = null;
         this.emitter.emit('did-change');
     }
+  }
+
+  detectResurrectionAfterDelay () {
+    return _.delay(() => this.detectResurrection(), 50);
   }
 
   async detectResurrection () {
