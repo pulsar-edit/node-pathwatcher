@@ -85,13 +85,14 @@ private:
     }
   };
 
-  void removeHandle(efsw::WatchID handle);
+  size_t removeHandle(efsw::WatchID handle);
   bool startNewStream();
 
   long nextHandleID;
   std::atomic<bool> isProcessing{false};
   std::atomic<bool> pendingDestruction{false};
   std::mutex processingMutex;
+  std::mutex mapMutex;
   std::condition_variable processingComplete;
 
   // The running event stream that subscribes to all the paths we care about.
@@ -103,5 +104,6 @@ private:
   std::set<std::string> dirsChanged;
 
   std::unordered_map<efsw::WatchID, std::string> handlesToPaths;
+  std::unordered_map<std::string, efsw::WatchID> pathsToHandles;
   std::unordered_map<efsw::WatchID, efsw::FileWatchListener*> handlesToListeners;
 };

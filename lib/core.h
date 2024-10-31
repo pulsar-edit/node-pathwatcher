@@ -110,15 +110,6 @@ public:
     std::string oldFilename
   ) override;
 
-  void handleFileAction(
-    efsw::WatchID watchId,
-    const std::string& dir,
-    const std::string& filename,
-    efsw::Action action,
-    std::string oldFilename,
-    bool shouldLock
-  );
-
   void AddPath(PathTimestampPair pair, efsw::WatchID handle);
   void RemovePath(efsw::WatchID handle);
   bool HasPath(std::string path);

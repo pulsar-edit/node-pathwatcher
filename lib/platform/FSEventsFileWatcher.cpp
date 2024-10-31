@@ -74,36 +74,52 @@ std::string PrecomposeFileName(const std::string& name) {
 	return result;
 }
 
+// Returns whether `path` currently exists on disk.
 bool PathExists(const std::string& path) {
   struct stat buffer;
   return (stat(path.c_str(), &buffer) == 0);
 }
 
+// Given two paths, determine whether the first descends from (or is equal to)
+// the second.
 bool PathStartsWith(const std::string& str, const std::string& prefix) {
   if (PathsAreEqual(str, prefix)) return true;
   if (prefix.length() > str.length()) {
     return false;
   }
-  return str.compare(0, prefix.length(), prefix) == 0;
+  auto normalizedPrefix = NormalizePath(prefix);
+  // We ensure `prefix` ends with a path separator so we don't mistakenly think
+  // that `/foo/barbaz` descends from `/foo/bar`.
+  return str.compare(0, normalizedPrefix.length(), normalizedPrefix) == 0;
 }
 
+// Strips a trailing slash from the path (in place).
 void DirRemoveSlashAtEnd (std::string& dir) {
   if (dir.size() >= 1 && dir[dir.size() - 1] == PATH_SEPARATOR) {
     dir.erase( dir.size() - 1 );
   }
 }
 
-std::string PathWithoutFileName( std::string filepath ) {
+// Given `/foo/bar/baz.txt`, returns `/foo/bar` (with or without a trailing
+// slash as desired).
+std::string PathWithoutFileName(std::string filepath, bool keepTrailingSeparator) {
   DirRemoveSlashAtEnd(filepath);
 
   size_t pos = filepath.find_last_of(PATH_SEPARATOR);
 
   if (pos != std::string::npos) {
-    return filepath.substr(0, pos + 1);
+    return filepath.substr(0, keepTrailingSeparator ? pos + 1 : pos);
   }
   return filepath;
 }
 
+std::string PathWithoutFileName(std::string filepath) {
+  // Default behavior of `PathWithoutFileName` is to keep the trailing
+  // separator.
+  return PathWithoutFileName(filepath, true);
+}
+
+// Given `/foo/bar/baz.txt`, returns `baz.txt`.
 std::string FileNameFromPath(std::string filepath) {
   DirRemoveSlashAtEnd(filepath);
 
@@ -115,6 +131,7 @@ std::string FileNameFromPath(std::string filepath) {
 	return filepath;
 }
 
+// Borrowed from `efsw`. Don’t ask me to explain it.
 static std::string convertCFStringToStdString( CFStringRef cfString ) {
 	// Try to get the C string pointer directly
 	const char* cStr = CFStringGetCStringPtr( cfString, kCFStringEncodingUTF8 );
@@ -179,8 +196,12 @@ efsw::WatchID FSEventsFileWatcher::addWatch(
   std::cout << "FSEventsFileWatcher::addWatch" << directory << std::endl;
 #endif
   efsw::WatchID handle = nextHandleID++;
-  handlesToPaths[handle] = directory;
-  handlesToListeners[handle] = listener;
+  {
+    std::lock_guard<std::mutex> lock(mapMutex);
+    handlesToPaths[handle] = directory;
+    pathsToHandles[directory] = handle;
+    handlesToListeners[handle] = listener;
+  }
 
   bool didStart = startNewStream();
 
@@ -199,9 +220,9 @@ void FSEventsFileWatcher::removeWatch(
 #ifdef DEBUG
   std::cout << "FSEventsFileWatcher::removeWatch" << handle << std::endl;
 #endif
-  removeHandle(handle);
+  auto remainingCount = removeHandle(handle);
 
-  if (handlesToPaths.size() == 0) {
+  if (remainingCount == 0) {
     if (currentEventStream) {
       FSEventStreamStop(currentEventStream);
       FSEventStreamInvalidate(currentEventStream);
@@ -310,156 +331,153 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
       kFSEventStreamEventFlagRootChanged
     )) continue;
 
-    // Since we aren’t doing recursive watchers, we can seemingly get away with
-    // using the first match we find. In nearly all cases, it’s impossible for
-    // a filesystem event to pertain to more than one watcher.
-    //
-    // But one exception is directory deletion, since that directory _and_ its
-    // parent directory can both be watched, and that would count as a deletion
-    // for the first and a change for the second.
-    //
-    // For that reason, we keep an array of matches, but stop as soon as we
-    // find two matches, since that's the practical maximum.
-    //
-    // TODO: On other platforms we handle this in the listener’s
-    // `handleFileAction` method. We don’t handle it there on macOS because the
-    // behavior of this function means we don’t know which of the two watchers
-    // in this scenario will be matched first. We could instead consistently
-    // return one or the other here, but since we’d have to loop through all
-    // the options anyway, it wouldn’t save us much effort.
-    //
-    // NOTE: In extreme situations with lots of paths, this could be a choke
-    // point, since it’s a nested loop. The fact that we’re just doing string
-    // comparisons should keep it fast, but we could optimize further by
-    // pre-normalizing the paths. We could also move to a better data
-    // structure, but better to invest that time in making this library
-    // obsolete in the first place.
-    //
-    // TODO: We could probably do this without looping somehow, right?
-    for (const auto& pair: handlesToPaths) {
-      std::string normalizedPath = NormalizePath(pair.second);
+    efsw::WatchID handle;
+    std::string path;
 
-      // Filter out everything that doesn’t equal or descend from this path.
-      if (!PathStartsWith(event.path, normalizedPath)) continue;
-
-      // We let this through if (a) it matches our path exactly, or (b) it
-      // refers to a child file/directory of ours (rather than a deeper
-      // descendant.)
-      if (
-        !PathsAreEqual(event.path, normalizedPath) && event.path.find_last_of(PATH_SEPARATOR) != normalizedPath.size() - 1
-      ) {
-        continue;
+    {
+      // How do we match up this path change to the watcher that cares about
+      // it?
+      //
+      // Since we do only non-recursive watching, there are a maximum of two
+      // watchers that can care about something — and 99% of cases will involve
+      // a single such watcher. This vastly simplifies our implementation
+      // compared to `efsw`’s — since it has to care about the possibility of
+      // recursive watchers, one file change can correspond to arbitrarily many
+      // watchers.
+      //
+      // For that reason, we can do a simple map lookup. First we try the
+      // path’s parent directory; if that’s not successful, we try the full
+      // path. One of these is (for practical purposes) guaranteed to find a
+      // watcher.
+      //
+      // NOTE: What about the 1% edge case? `efsw` has an incorrect behavior
+      // here: in the rare case of a watcher existing on both a parent
+      // directory and a child directory, it will choose only the parent when
+      // the child is deleted.
+      //
+      // This is incorrect, but it's _conveniently_ incorrect! We can fix it
+      // later in the listener (with identical cross-platform code), and it
+      // allows us to choose a single winner here in all cases, simplifying the
+      // implementation further.
+      std::lock_guard<std::mutex> lock(mapMutex);
+      auto itpth = pathsToHandles.find(PathWithoutFileName(event.path, false));
+      if (itpth != pathsToHandles.end()) {
+        // We have an entry for this paths’s owner directory. We prefer this
+        // whether the entry itself is a file or a directory (to replicate
+        // `efsw`’s bug).
+        path = itpth->first;
+        handle = itpth->second;
+      } else {
+        // Otherwise, we check if the path has a watcher of its own. This only
+        // applies when the path is itself a directory and only when the
+        // directory is being deleted (since we don’t let you watch a directory
+        // before it exists).
+        //
+        // If _both_ the parent directory _and_ the child directory are being
+        // watched in this scenario, we won’t get this far. We'll still
+        // notify both watchers, but that gets handled in `core.cc`.
+        itpth = pathsToHandles.find(event.path);
+        if (itpth != pathsToHandles.end()) {
+          path = itpth->first;
+          handle = itpth->second;
+        } else {
+          // We couldn't find a handle for this path. This is odd, but it’s
+          // not a big deal.
+          continue;
+        }
       }
-
-      FileEventMatch match;
-      match.path = pair.second;
-      match.handle = pair.first;
-      matches.push_back(match);
-
-      // TODO: We can probably break after the first match in many situations.
-      // For instance, if we prove this can’t be a directory deletion!
-      if (matches.size() == 2) break;
     }
-
-    if (matches.size() == 0) return;
 
     std::string dirPath(PathWithoutFileName(event.path));
     std::string filePath(FileNameFromPath(event.path));
 
-    size_t msize = matches.size();
-
-    for (size_t i = 0; i < msize; i++) {
-      std::string path(matches[i].path);
-      efsw::WatchID handle(matches[i].handle);
-
-      if (event.flags & (
-        kFSEventStreamEventFlagItemCreated |
-        kFSEventStreamEventFlagItemRemoved |
-        kFSEventStreamEventFlagItemRenamed
-      )) {
-        if (dirPath != path) {
-          dirsChanged.insert(dirPath);
-        }
+    if (event.flags & (
+      kFSEventStreamEventFlagItemCreated |
+      kFSEventStreamEventFlagItemRemoved |
+      kFSEventStreamEventFlagItemRenamed
+    )) {
+      if (dirPath != path) {
+        dirsChanged.insert(dirPath);
       }
+    }
 
-      // `efsw`‘s’ comment here suggests that you can’t reliably infer order
-      // from these events — so if the same file is marked as added and changed
-      // and deleted in consecutive events, you don't know if it was deleted/
-      // added/modified, modified/deleted/added, etc.
-      //
-      // This is the equivalent logic from `WatcherFSEvents.cpp` because I
-      // don’t trust myself to touch it at all.
-      if (event.flags & kFSEventStreamEventFlagItemRenamed) {
-        // Does the next event also refer to this same file, and is that event
-        // also a rename?
-        if (
-          (i + 1 < esize) &&
-          (events[i + 1].flags & kFSEventStreamEventFlagItemRenamed) &&
-          (events[i + 1].inode == event.inode)
-        ) {
-          // If so, compare this event and the next one to figure out which one
-          // refers to a current file on disk.
-          FSEvent& nEvent = events[i + 1];
-          std::string newDir(PathWithoutFileName(nEvent.path));
-          std::string newFilepath(FileNameFromPath(nEvent.path));
+    // `efsw`‘s’ comment here suggests that you can’t reliably infer order
+    // from these events — so if the same file is marked as added and changed
+    // and deleted in consecutive events, you don't know if it was deleted/
+    // added/modified, modified/deleted/added, etc.
+    //
+    // This is the equivalent logic from `WatcherFSEvents.cpp` because I
+    // don’t trust myself to touch it at all.
+    if (event.flags & kFSEventStreamEventFlagItemRenamed) {
+      // Does the next event also refer to this same file, and is that event
+      // also a rename?
+      if (
+        (i + 1 < esize) &&
+        (events[i + 1].flags & kFSEventStreamEventFlagItemRenamed) &&
+        (events[i + 1].inode == event.inode)
+      ) {
+        // If so, compare this event and the next one to figure out which one
+        // refers to a current file on disk.
+        FSEvent& nEvent = events[i + 1];
+        std::string newDir(PathWithoutFileName(nEvent.path));
+        std::string newFilepath(FileNameFromPath(nEvent.path));
 
-          if (event.path != nEvent.path) {
-            if (dirPath == newDir) {
-              // This is a move within the same directory.
-              if (
-                !PathExists(event.path) ||
-                0 == strcasecmp(event.path.c_str(), nEvent.path.c_str())
-              ) {
-                // Move from one path to the other.
-                sendFileAction(handle, dirPath, newFilepath, efsw::Actions::Moved, filePath);
-              } else {
-                // Move in the opposite direction.
-                sendFileAction(handle, dirPath, filePath, efsw::Actions::Moved, newFilepath);
-              }
+        if (event.path != nEvent.path) {
+          if (dirPath == newDir) {
+            // This is a move within the same directory.
+            if (
+              !PathExists(event.path) ||
+              0 == strcasecmp(event.path.c_str(), nEvent.path.c_str())
+            ) {
+              // Move from one path to the other.
+              sendFileAction(handle, dirPath, newFilepath, efsw::Actions::Moved, filePath);
             } else {
-              // This is a move from one directory to another, so we'll treat
-              // it as one deletion and one creation.
-              sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
-              sendFileAction(handle, newDir, newFilepath, efsw::Actions::Add);
-
-              if (nEvent.flags & shorthandFSEventsModified) {
-                sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
-              }
+              // Move in the opposite direction.
+              sendFileAction(handle, dirPath, filePath, efsw::Actions::Moved, newFilepath);
             }
           } else {
-            // The file paths are the same, so we'll let another function
-            // untangle it.
-            handleAddModDel(handle, nEvent.flags, nEvent.path, dirPath, filePath);
-          }
+            // This is a move from one directory to another, so we'll treat
+            // it as one deletion and one creation.
+            sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
+            sendFileAction(handle, newDir, newFilepath, efsw::Actions::Add);
 
-          if (nEvent.flags & (
-            kFSEventStreamEventFlagItemCreated |
-            kFSEventStreamEventFlagItemRemoved |
-            kFSEventStreamEventFlagItemRenamed
-          )) {
-            if (newDir != path) {
-              dirsChanged.insert(newDir);
+            if (nEvent.flags & shorthandFSEventsModified) {
+              sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
             }
           }
-
-          // Skip the renamed file.
-          i++;
-        } else if (PathExists(event.path)) {
-          // Treat remaining renames as creations when we know the path still
-          // exists…
-          sendFileAction(handle, dirPath, filePath, efsw::Actions::Add);
-
-          if (event.flags & shorthandFSEventsModified) {
-            sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
-          }
         } else {
-          // …and as deletions when we know the path doesn’t still exist.
-          sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
+          // The file paths are the same, so we'll let another function
+          // untangle it.
+          handleAddModDel(handle, nEvent.flags, nEvent.path, dirPath, filePath);
+        }
+
+        if (nEvent.flags & (
+          kFSEventStreamEventFlagItemCreated |
+          kFSEventStreamEventFlagItemRemoved |
+          kFSEventStreamEventFlagItemRenamed
+        )) {
+          if (newDir != path) {
+            dirsChanged.insert(newDir);
+          }
+        }
+
+        // Skip the renamed file.
+        i++;
+      } else if (PathExists(event.path)) {
+        // Treat remaining renames as creations when we know the path still
+        // exists…
+        sendFileAction(handle, dirPath, filePath, efsw::Actions::Add);
+
+        if (event.flags & shorthandFSEventsModified) {
+          sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
         }
       } else {
-        // Ordinary business — new files, changed, files, deleted files.
-        handleAddModDel(handle, event.flags, event.path, dirPath, filePath);
+        // …and as deletions when we know the path doesn’t still exist.
+        sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
       }
+    } else {
+      // Ordinary business — new files, changed, files, deleted files.
+      handleAddModDel(handle, event.flags, event.path, dirPath, filePath);
     }
   }
 }
@@ -493,15 +511,23 @@ void FSEventsFileWatcher::handleAddModDel(
 }
 
 // Private: clean up a handle from both unordered maps.
-void FSEventsFileWatcher::removeHandle(efsw::WatchID handle) {
+size_t FSEventsFileWatcher::removeHandle(efsw::WatchID handle) {
+  std::lock_guard<std::mutex> lock(mapMutex);
+  std::string path;
   auto itp = handlesToPaths.find(handle);
   if (itp != handlesToPaths.end()) {
+    path = itp->second;
     handlesToPaths.erase(itp);
+  }
+  auto itpth = pathsToHandles.find(path);
+  if (itpth != pathsToHandles.end()) {
+    pathsToHandles.erase(itpth);
   }
   auto itl = handlesToListeners.find(handle);
   if (itl != handlesToListeners.end()) {
     handlesToListeners.erase(itl);
   }
+  return handlesToPaths.size();
 }
 
 void FSEventsFileWatcher::process() {
@@ -530,19 +556,22 @@ void FSEventsFileWatcher::process() {
     std::string path;
     bool found = false;
 
-    for (const auto& pair: handlesToPaths) {
-      if (!PathStartsWith(dir, pair.second)) continue;
+    {
+      std::lock_guard<std::mutex> lock(mapMutex);
+      for (const auto& pair: handlesToPaths) {
+        if (!PathStartsWith(dir, pair.second)) continue;
 
-      if (
-        !PathsAreEqual(dir, pair.second) && dir.find_last_of(PATH_SEPARATOR) != pair.second.size() - 1
-      ) {
-        continue;
+        if (
+          !PathsAreEqual(dir, pair.second) && dir.find_last_of(PATH_SEPARATOR) != pair.second.size() - 1
+        ) {
+          continue;
+        }
+
+        found = true;
+        path = pair.second;
+        handle = pair.first;
+        break;
       }
-
-      found = true;
-      path = pair.second;
-      handle = pair.first;
-      break;
     }
 
     if (!found) continue;
@@ -566,14 +595,17 @@ bool FSEventsFileWatcher::startNewStream() {
   // Build a list of all current watched paths. We'll eventually pass this to
   // `FSEventStreamCreate`.
   std::vector<CFStringRef> cfStrings;
-  for (const auto& pair : handlesToPaths) {
-    CFStringRef cfStr = CFStringCreateWithCString(
-      kCFAllocatorDefault,
-      pair.second.c_str(),
-      kCFStringEncodingUTF8
-    );
-    if (cfStr) {
-      cfStrings.push_back(cfStr);
+  std::lock_guard<std::mutex> lock(mapMutex);
+  {
+    for (const auto& pair : handlesToPaths) {
+      CFStringRef cfStr = CFStringCreateWithCString(
+        kCFAllocatorDefault,
+        pair.second.c_str(),
+        kCFStringEncodingUTF8
+      );
+      if (cfStr) {
+        cfStrings.push_back(cfStr);
+      }
     }
   }
 

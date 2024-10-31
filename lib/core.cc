@@ -208,19 +208,6 @@ void PathWatcherListener::handleFileAction(
   efsw::Action action,
   std::string oldFilename
 ) {
-  // When this is invoked directly by `efsw`, we always want to acquire the
-  // shutdown mutex.
-  return handleFileAction(watchId, dir, filename, action, oldFilename, true);
-}
-
-void PathWatcherListener::handleFileAction(
-  efsw::WatchID watchId,
-  const std::string& dir,
-  const std::string& filename,
-  efsw::Action action,
-  std::string oldFilename,
-  bool shouldLock
-) {
 #ifdef DEBUG
   std::cout << "PathWatcherListener::handleFileAction dir: " << dir << " filename: " << filename << " action: " << EventType(action, true) << std::endl;
 #endif
@@ -229,15 +216,8 @@ void PathWatcherListener::handleFileAction(
 
   // …but if we haven't, make sure that shutdown doesn’t happen until we’re
   // done.
-  //
-  // The `shouldLock` parameter is here because, in rare cases, we might need
-  // to call `handleFileAction` recursively. Inner calls of `handleFileAction`
-  // should not try to acquire the mutex because it's already been acquired by
-  // the outer call.
-  if (shouldLock) {
-    std::lock_guard<std::mutex> lock(shutdownMutex);
-    if (isShuttingDown) return;
-  }
+  std::lock_guard<std::mutex> lock(shutdownMutex);
+  if (isShuttingDown) return;
 
   // Extract the expected watcher path and (on macOS) the start time of the
   // watcher.
@@ -308,46 +288,6 @@ void PathWatcherListener::handleFileAction(
   }
 #endif
 
-#ifndef _APPLE_
-  // One special case we need to handle on all platforms:
-  //
-  // * Watcher exists on directory `/foo/bar`.
-  // * Watcher exists on directory `/foo/bar/baz`.
-  // * Directory `/foo/bar/baz` is deleted.
-  //
-  // In this instance, both watchers should be notified.
-  //
-  // On macOS, we handle this in the custom watcher. On other platforms, we’ll
-  // handle it here.
-  if (action == efsw::Action::Delete) {
-#ifdef DEBUG
-  std::cout << "This might be a directory deletion: [" << newPathStr << "] and we are in path responder: [" << realPath << "] with handle: " << watchId << std::endl;
-#endif
-  }
-
-  if (HasPath(newPathStr) && action == efsw::Action::Delete) {
-
-#ifdef DEBUG
-  std::cout << "Detected watched directory deletion inside watched parent!" << std::endl;
-#endif
-    efsw::WatchID handle = GetHandleForPath(newPathStr);
-#ifdef DEBUG
-  std::cout << "Other handle: " <<  handle << std::endl;
-#endif
-
-    if (watchId != handle) {
-      handleFileAction(
-        handle,
-        dir,
-        filename,
-        action,
-        "",
-        false
-      );
-    }
-  }
-
-#endif
   std::vector<char> oldPath;
   if (!oldFilename.empty()) {
     std::string oldPathStr = dir + oldFilename;
@@ -362,6 +302,32 @@ void PathWatcherListener::handleFileAction(
     return;
   }
 
+  // One (rare) special case we need to handle on all platforms:
+  //
+  // * Watcher exists on directory `/foo/bar`.
+  // * Watcher exists on directory `/foo/bar/baz`.
+  // * Directory `/foo/bar/baz` is deleted.
+  //
+  // In this instance, both watchers should be notified, but `efsw` will signal
+  // only the `/foo/bar` watcher. (If only `/foo/bar/baz` were present, the
+  // `/foo/bar/baz` watcher would be signalled instead.)
+  //
+  // Our custom macOS implementation replicates this incorrect behavior so that
+  // we can handle this case uniformly in this one place.
+  bool hasSecondMatch = false;
+  efsw::WatchID secondHandle;
+
+  // If we need to account for this scenario, then the full path will have its
+  // own watcher. Since we only watch directories, this proves that the full
+  // path is a directory.
+  if (HasPath(newPathStr) && action == efsw::Action::Delete) {
+    efsw::WatchID handle = GetHandleForPath(newPathStr);
+    if (watchId != handle) {
+      hasSecondMatch = true;
+      secondHandle = handle;
+    }
+  }
+
   PathWatcherEvent* event = new PathWatcherEvent(action, watchId, newPath, oldPath, realPath);
 
   // TODO: Instead of calling `BlockingCall` once per event, throttle them by
@@ -369,6 +335,15 @@ void PathWatcherListener::handleFileAction(
   // them in batches more efficiently — and for the wrapper JavaScript code to
   // do some elimination of redundant events.
   status = tsfn.BlockingCall(event, ProcessEvent);
+
+  if (hasSecondMatch && status == napi_ok) {
+    // In the rare case of the scenario described above, we have a second
+    // callback invocation to make with a second event. Luckily, the only thing
+    // that changes about the event is the handle!
+    PathWatcherEvent* secondEvent = new PathWatcherEvent(action, secondHandle, newPath, oldPath, realPath);
+    tsfn.BlockingCall(secondEvent, ProcessEvent);
+  }
+
   tsfn.Release();
   if (status != napi_ok) {
     // TODO: Not sure how this could fail, or how we should present it to the
