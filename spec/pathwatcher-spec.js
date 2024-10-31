@@ -154,7 +154,7 @@ describe('PathWatcher', () => {
     });
   });
 
-  describe('when a directory child of a watched directory is deleted', () => {
+  describe('watching a directory', () => {
     let subDir;
     beforeEach(() => {
       subDir = path.join(tempDir, 'subdir');
@@ -168,16 +168,60 @@ describe('PathWatcher', () => {
         fs.rmSync(subDir, { recursive: true });
       }
     });
-
-    it('fires one event when we watch only the inner directory', async () => {
-      // This test proves that, under normal circumstances, `efsw` correctly
-      // triggers a watcher on a directory when that very directory is deleted.
+    it('fails to detect that same directory’s deletion', async () => {
+      // This test proves that `efsw` does not detect when a directory is
+      // deleted if you are watching that exact path. Our custom macOS
+      // implementation should behave the same way for predictability.
       let innerSpy = jasmine.createSpy('innerSpy');
       PathWatcher.watch(subDir, innerSpy);
       await wait(20);
       fs.rmSync(subDir, { recursive: true });
-      await condition(() => innerSpy.calls.count() > 0);
-      expect(innerSpy).toHaveBeenCalled();
+      await wait(200);
+      expect(innerSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // NOTE: These specs are aspirational, and were based on the premise that
+  //
+  // (a) `efsw` properly detects a directory’s own deletion when you’re
+  // watching the directory for changes; (b) `efsw` improperly signals only the
+  // parent watcher when both parent and child directories are being watched
+  // and the child is deleted.
+  //
+  // In fact, (a) is false. I observed the behavior from (b) and considered it
+  // a bug, but if `efsw` is designed not to detect (a), then (b) is perfectly
+  // logical and consistent.
+  //
+  // I wrote an elaborate workaround for the behavior I observed on macOS (with
+  // my custom FSEvent implementation) without properly verifying that Linux
+  // and Windows behave the same way.
+  //
+  // It makes intuitive sense that `PathWatcher.watch` should invoke its
+  // callback when it’s watching a directory and the directory itself is
+  // deleted, but that doesn’t currently happen in `efsw`, and `pathwatcher`
+  // never seems to have expected that behavior itself.
+  //
+  // To support this properly, `efsw` would have to support the detection of a
+  // directory deletion when the directory itself is being watched. As it is,
+  // it detects this only when the directory’s parent is being watched.
+  //
+  // This means that it would be easy to support something like
+  // `Directory::onDidDelete` if we wanted to — we’d just set up a second
+  // watcher on the directory’s parent.
+  //
+  xdescribe('when a directory child of a watched directory is deleted', () => {
+    let subDir;
+    beforeEach(() => {
+      subDir = path.join(tempDir, 'subdir');
+      if (!fs.existsSync(subDir)) {
+        fs.mkdirSync(subDir);
+      }
+    });
+
+    afterEach(() => {
+      if (subDir && fs.existsSync(subDir)) {
+        fs.rmSync(subDir, { recursive: true });
+      }
     });
 
     it('fires two events IF the child had its own watcher', async () => {
