@@ -101,6 +101,7 @@ public:
     Napi::Env env,
     Napi::ThreadSafeFunction tsfn
   );
+
   void handleFileAction(
     efsw::WatchID watchId,
     const std::string& dir,
@@ -108,6 +109,15 @@ public:
     efsw::Action action,
     std::string oldFilename
   ) override;
+
+  void handleFileAction(
+    efsw::WatchID watchId,
+    const std::string& dir,
+    const std::string& filename,
+    efsw::Action action,
+    std::string oldFilename,
+    bool shouldLock
+  );
 
   void AddPath(PathTimestampPair pair, efsw::WatchID handle);
   void RemovePath(efsw::WatchID handle);
@@ -121,6 +131,7 @@ private:
   std::atomic<bool> isShuttingDown{false};
   std::mutex shutdownMutex;
   std::mutex pathsMutex;
+  std::mutex pathsToHandlesMutex;
   Napi::ThreadSafeFunction tsfn;
   std::unordered_map<efsw::WatchID, PathTimestampPair> paths;
   std::unordered_map<std::string, efsw::WatchID> pathsToHandles;

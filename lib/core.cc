@@ -163,28 +163,35 @@ void PathWatcherListener::AddPath(PathTimestampPair pair, efsw::WatchID handle) 
 
 // Remove metadata for a given watch ID.
 void PathWatcherListener::RemovePath(efsw::WatchID handle) {
-  std::lock_guard<std::mutex> lock(pathsMutex);
-  auto it = paths.find(handle);
+  std::string path;
+  {
+    std::lock_guard<std::mutex> lock(pathsMutex);
+    auto it = paths.find(handle);
 #ifdef DEBUG
   std::cout << "Unwatching handle: [" << handle << "] path: [" << it->second.path << "]" << std::endl;
 #endif
 
-  if (it == paths.end()) return;
-  auto path = it->second.path;
-  paths.erase(it);
-  auto itp = pathsToHandles.find(path);
-  if (itp == pathsToHandles.end()) return;
-  pathsToHandles.erase(itp);
+    if (it == paths.end()) return;
+    path = it->second.path;
+    paths.erase(it);
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(pathsToHandlesMutex);
+    auto itp = pathsToHandles.find(path);
+    if (itp == pathsToHandles.end()) return;
+    pathsToHandles.erase(itp);
+  }
 }
 
 bool PathWatcherListener::HasPath(std::string path) {
-  std::lock_guard<std::mutex> lock(pathsMutex);
+  std::lock_guard<std::mutex> lock(pathsToHandlesMutex);
   auto it = pathsToHandles.find(path);
   return it != pathsToHandles.end();
 }
 
 efsw::WatchID PathWatcherListener::GetHandleForPath(std::string path) {
-  std::lock_guard<std::mutex> lock(pathsMutex);
+  std::lock_guard<std::mutex> lock(pathsToHandlesMutex);
   auto it = pathsToHandles.find(path);
   return it->second;
 }
@@ -201,13 +208,36 @@ void PathWatcherListener::handleFileAction(
   efsw::Action action,
   std::string oldFilename
 ) {
+  // When this is invoked directly by `efsw`, we always want to acquire the
+  // shutdown mutex.
+  return handleFileAction(watchId, dir, filename, action, oldFilename, true);
+}
+
+void PathWatcherListener::handleFileAction(
+  efsw::WatchID watchId,
+  const std::string& dir,
+  const std::string& filename,
+  efsw::Action action,
+  std::string oldFilename,
+  bool shouldLock
+) {
 #ifdef DEBUG
   std::cout << "PathWatcherListener::handleFileAction dir: " << dir << " filename: " << filename << " action: " << EventType(action, true) << std::endl;
 #endif
-  // Don't try to proceed if we've already started the shutdown process.
+  // Don't try to proceed if we've already started the shutdown process…
   if (isShuttingDown) return;
-  std::lock_guard<std::mutex> lock(shutdownMutex);
-  if (isShuttingDown) return;
+
+  // …but if we haven't, make sure that shutdown doesn’t happen until we’re
+  // done.
+  //
+  // The `shouldLock` parameter is here because, in rare cases, we might need
+  // to call `handleFileAction` recursively. Inner calls of `handleFileAction`
+  // should not try to acquire the mutex because it's already been acquired by
+  // the outer call.
+  if (shouldLock) {
+    std::lock_guard<std::mutex> lock(shutdownMutex);
+    if (isShuttingDown) return;
+  }
 
   // Extract the expected watcher path and (on macOS) the start time of the
   // watcher.
@@ -278,6 +308,7 @@ void PathWatcherListener::handleFileAction(
   }
 #endif
 
+#ifndef _APPLE_
   // One special case we need to handle on all platforms:
   //
   // * Watcher exists on directory `/foo/bar`.
@@ -288,11 +319,9 @@ void PathWatcherListener::handleFileAction(
   //
   // On macOS, we handle this in the custom watcher. On other platforms, we’ll
   // handle it here.
-
-#ifndef _APPLE_
   if (action == efsw::Action::Delete) {
 #ifdef DEBUG
-  std::cout << "This might be a directory deletion: [" << newPathStr << "] and we are in path responder: [" << realPath << "]" << std::endl;
+  std::cout << "This might be a directory deletion: [" << newPathStr << "] and we are in path responder: [" << realPath << "] with handle: " << watchId << std::endl;
 #endif
   }
 
@@ -302,13 +331,18 @@ void PathWatcherListener::handleFileAction(
   std::cout << "Detected watched directory deletion inside watched parent!" << std::endl;
 #endif
     efsw::WatchID handle = GetHandleForPath(newPathStr);
+#ifdef DEBUG
+  std::cout << "Other handle: " <<  handle << std::endl;
+#endif
+
     if (watchId != handle) {
       handleFileAction(
         handle,
         dir,
         filename,
         action,
-        ""
+        "",
+        false
       );
     }
   }

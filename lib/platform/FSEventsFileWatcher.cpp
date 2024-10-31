@@ -321,12 +321,21 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
     // For that reason, we keep an array of matches, but stop as soon as we
     // find two matches, since that's the practical maximum.
     //
+    // TODO: On other platforms we handle this in the listener’s
+    // `handleFileAction` method. We don’t handle it there on macOS because the
+    // behavior of this function means we don’t know which of the two watchers
+    // in this scenario will be matched first. We could instead consistently
+    // return one or the other here, but since we’d have to loop through all
+    // the options anyway, it wouldn’t save us much effort.
+    //
     // NOTE: In extreme situations with lots of paths, this could be a choke
     // point, since it’s a nested loop. The fact that we’re just doing string
     // comparisons should keep it fast, but we could optimize further by
     // pre-normalizing the paths. We could also move to a better data
     // structure, but better to invest that time in making this library
     // obsolete in the first place.
+    //
+    // TODO: We could probably do this without looping somehow, right?
     for (const auto& pair: handlesToPaths) {
       std::string normalizedPath = NormalizePath(pair.second);
 
