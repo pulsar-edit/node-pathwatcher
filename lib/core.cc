@@ -67,6 +67,11 @@ static std::string NormalizePath(std::string path) {
   return path + PATH_SEPARATOR;
 }
 
+static void StripTrailingSlashFromPath(std::string& path) {
+  if (path.empty() || (path.back() != '/')) return;
+  path.pop_back();
+}
+
 static bool PathsAreEqual(std::string pathA, std::string pathB) {
   return NormalizePath(pathA) == NormalizePath(pathB);
 }
@@ -153,6 +158,7 @@ void PathWatcherListener::Stop(FileWatcher* fileWatcher) {
 void PathWatcherListener::AddPath(PathTimestampPair pair, efsw::WatchID handle) {
   std::lock_guard<std::mutex> lock(pathsMutex);
   paths[handle] = pair;
+  pathsToHandles[pair.path] = handle;
 }
 
 // Remove metadata for a given watch ID.
@@ -164,7 +170,23 @@ void PathWatcherListener::RemovePath(efsw::WatchID handle) {
 #endif
 
   if (it == paths.end()) return;
+  auto path = it->second.path;
   paths.erase(it);
+  auto itp = pathsToHandles.find(path);
+  if (itp == pathsToHandles.end()) return;
+  pathsToHandles.erase(itp);
+}
+
+bool PathWatcherListener::HasPath(std::string path) {
+  std::lock_guard<std::mutex> lock(pathsMutex);
+  auto it = pathsToHandles.find(path);
+  return it != pathsToHandles.end();
+}
+
+efsw::WatchID PathWatcherListener::GetHandleForPath(std::string path) {
+  std::lock_guard<std::mutex> lock(pathsMutex);
+  auto it = pathsToHandles.find(path);
+  return it->second;
 }
 
 bool PathWatcherListener::IsEmpty() {
@@ -256,6 +278,42 @@ void PathWatcherListener::handleFileAction(
   }
 #endif
 
+  // One special case we need to handle on all platforms:
+  //
+  // * Watcher exists on directory `/foo/bar`.
+  // * Watcher exists on directory `/foo/bar/baz`.
+  // * Directory `/foo/bar/baz` is deleted.
+  //
+  // In this instance, both watchers should be notified.
+  //
+  // On macOS, we handle this in the custom watcher. On other platforms, we’ll
+  // handle it here.
+
+#ifndef _APPLE_
+  if (action == efsw::Action::Delete) {
+#ifdef DEBUG
+  std::cout << "This might be a directory deletion: [" << newPathStr << "] and we are in path responder: [" << realPath << "]" << std::endl;
+#endif
+  }
+
+  if (HasPath(newPathStr) && action == efsw::Action::Delete) {
+
+#ifdef DEBUG
+  std::cout << "Detected watched directory deletion inside watched parent!" << std::endl;
+#endif
+    efsw::WatchID handle = GetHandleForPath(newPathStr);
+    if (watchId != handle) {
+      handleFileAction(
+        handle,
+        dir,
+        filename,
+        action,
+        ""
+      );
+    }
+  }
+
+#endif
   std::vector<char> oldPath;
   if (!oldFilename.empty()) {
     std::string oldPathStr = dir + oldFilename;
@@ -335,6 +393,8 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
   // us anyway.
   Napi::String path = info[0].ToString();
   std::string cppPath(path);
+
+  StripTrailingSlashFromPath(cppPath);
 
 #ifdef DEBUG
   std::cout << "PathWatcher::Watch path: [" << cppPath << "]" << std::endl;

@@ -111,6 +111,8 @@ public:
 
   void AddPath(PathTimestampPair pair, efsw::WatchID handle);
   void RemovePath(efsw::WatchID handle);
+  bool HasPath(std::string path);
+  efsw::WatchID GetHandleForPath(std::string path);
   bool IsEmpty();
   void Stop();
   void Stop(FileWatcher* fileWatcher);
@@ -121,6 +123,7 @@ private:
   std::mutex pathsMutex;
   Napi::ThreadSafeFunction tsfn;
   std::unordered_map<efsw::WatchID, PathTimestampPair> paths;
+  std::unordered_map<std::string, efsw::WatchID> pathsToHandles;
 };
 
 
