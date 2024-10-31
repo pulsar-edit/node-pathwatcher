@@ -56,6 +56,60 @@ describe('PathWatcher', () => {
     });
   });
 
+  // The purpose of this `describe` block is to ensure that our custom FSEvent
+  // implementation on macOS agrees with the built-in `efsw` implementations on
+  // Windows and Linux.
+  //
+  // Notably: in order to behave predictably, the FSEvent watcher should not
+  // trigger a watcher on `/foo/bar/baz` when `/foo/bar/baz` itself is deleted,
+  // since that’s how the other watcher implementations behave.
+  describe('when a watched directory is deleted', () => {
+    let subDir;
+    beforeEach(() => {
+      subDir = path.join(tempDir, 'subdir');
+      if (!fs.existsSync(subDir)) {
+        fs.mkdirSync(subDir);
+      }
+    });
+
+    afterEach(() => {
+      if (subDir && fs.existsSync(subDir)) {
+        fs.rmSync(subDir, { recursive: true });
+      }
+    });
+
+    it('does not trigger the callback', async () => {
+      // This test proves that `efsw` does not detect when a directory is
+      // deleted if you are watching that exact path. Our custom macOS
+      // implementation should behave the same way for predictability.
+      let innerSpy = jasmine.createSpy('innerSpy');
+      PathWatcher.watch(subDir, innerSpy);
+      await wait(20);
+      fs.rmSync(subDir, { recursive: true });
+      await wait(200);
+      expect(innerSpy).not.toHaveBeenCalled();
+    });
+
+    it('triggers a callback on the directory’s parent if the parent is being watched', async () => {
+      // We can detect the directory’s deletion if we watch its parent
+      // directory.
+      //
+      // This test proves that, but it also proves that a watcher on the
+      // deleted directory is still not invoked in this scenario. This was a
+      // specific scenario I tried to handle and this test proves that said
+      // workaround is not present.
+      let outerSpy = jasmine.createSpy('outerSpy');
+      let innerSpy = jasmine.createSpy('innerSpy');
+      PathWatcher.watch(tempDir, outerSpy);
+      PathWatcher.watch(subDir, innerSpy);
+      await wait(20);
+      fs.rmSync(subDir, { recursive: true });
+      await condition(() => outerSpy.calls.count() > 0);
+      await wait(200);
+      expect(innerSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('when a watched path is changed', () => {
     it('fires the callback with the event type and empty path', async () => {
       let eventType;
@@ -152,115 +206,6 @@ describe('PathWatcher', () => {
       fs.writeFileSync(newFile, 'x');
       await condition(() => done);
     });
-  });
-
-  describe('watching a directory', () => {
-    let subDir;
-    beforeEach(() => {
-      subDir = path.join(tempDir, 'subdir');
-      if (!fs.existsSync(subDir)) {
-        fs.mkdirSync(subDir);
-      }
-    });
-
-    afterEach(() => {
-      if (subDir && fs.existsSync(subDir)) {
-        fs.rmSync(subDir, { recursive: true });
-      }
-    });
-    it('fails to detect that same directory’s deletion', async () => {
-      // This test proves that `efsw` does not detect when a directory is
-      // deleted if you are watching that exact path. Our custom macOS
-      // implementation should behave the same way for predictability.
-      let innerSpy = jasmine.createSpy('innerSpy');
-      PathWatcher.watch(subDir, innerSpy);
-      await wait(20);
-      fs.rmSync(subDir, { recursive: true });
-      await wait(200);
-      expect(innerSpy).not.toHaveBeenCalled();
-    });
-  });
-
-  // NOTE: These specs are aspirational, and were based on the premise that
-  //
-  // (a) `efsw` properly detects a directory’s own deletion when you’re
-  // watching the directory for changes; (b) `efsw` improperly signals only the
-  // parent watcher when both parent and child directories are being watched
-  // and the child is deleted.
-  //
-  // In fact, (a) is false. I observed the behavior from (b) and considered it
-  // a bug, but if `efsw` is designed not to detect (a), then (b) is perfectly
-  // logical and consistent.
-  //
-  // I wrote an elaborate workaround for the behavior I observed on macOS (with
-  // my custom FSEvent implementation) without properly verifying that Linux
-  // and Windows behave the same way.
-  //
-  // It makes intuitive sense that `PathWatcher.watch` should invoke its
-  // callback when it’s watching a directory and the directory itself is
-  // deleted, but that doesn’t currently happen in `efsw`, and `pathwatcher`
-  // never seems to have expected that behavior itself.
-  //
-  // To support this properly, `efsw` would have to support the detection of a
-  // directory deletion when the directory itself is being watched. As it is,
-  // it detects this only when the directory’s parent is being watched.
-  //
-  // This means that it would be easy to support something like
-  // `Directory::onDidDelete` if we wanted to — we’d just set up a second
-  // watcher on the directory’s parent.
-  //
-  xdescribe('when a directory child of a watched directory is deleted', () => {
-    let subDir;
-    beforeEach(() => {
-      subDir = path.join(tempDir, 'subdir');
-      if (!fs.existsSync(subDir)) {
-        fs.mkdirSync(subDir);
-      }
-    });
-
-    afterEach(() => {
-      if (subDir && fs.existsSync(subDir)) {
-        fs.rmSync(subDir, { recursive: true });
-      }
-    });
-
-    it('fires two events IF the child had its own watcher', async () => {
-      // But if the directory’s parent is _also_ being watched, `efsw` _does
-      // not_ trigger the directory’s own watcher; it will trigger only the
-      // outer watcher.
-      //
-      // This test proves that we handle this case correctly nonetheless. We do
-      // so in the native code by manually testing for the presence of a
-      // watcher at the subdirectory’s path and explicitly invoking the
-      // callback with that handle.
-      let outerSpy = jasmine.createSpy('outerSpy');
-      let innerSpy = jasmine.createSpy('innerSpy');
-      PathWatcher.watch(tempDir, outerSpy);
-      PathWatcher.watch(subDir, innerSpy);
-      await wait(20);
-      fs.rmSync(subDir, { recursive: true });
-      await condition(() => outerSpy.calls.count() > 0);
-      await wait(200);
-      expect(innerSpy).toHaveBeenCalled();
-    });
-
-    it('fires two events IF the child had its own watcher (same watchers attached in opposite order)', async () => {
-      // We test this scenario to prove that `efsw` consistently picks the
-      // outer directory’s watcher regardless of observation order. If that
-      // weren’t true, then this test would fail, since the native logic for
-      // detecting this scenario wouldn’t work if it had to manually invoke the
-      // outer watcher.
-      let outerSpy = jasmine.createSpy('outerSpy');
-      let innerSpy = jasmine.createSpy('innerSpy');
-      PathWatcher.watch(subDir, innerSpy);
-      PathWatcher.watch(tempDir, outerSpy);
-      await wait(20);
-      fs.rmSync(subDir, { recursive: true });
-      await condition(() => outerSpy.calls.count() > 0);
-      await wait(200);
-      expect(innerSpy).toHaveBeenCalled();
-    });
-
   });
 
   describe('when a file under a watched directory is moved', () => {

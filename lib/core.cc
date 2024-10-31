@@ -302,32 +302,6 @@ void PathWatcherListener::handleFileAction(
     return;
   }
 
-  // One (rare) special case we need to handle on all platforms:
-  //
-  // * Watcher exists on directory `/foo/bar`.
-  // * Watcher exists on directory `/foo/bar/baz`.
-  // * Directory `/foo/bar/baz` is deleted.
-  //
-  // In this instance, both watchers should be notified, but `efsw` will signal
-  // only the `/foo/bar` watcher. (If only `/foo/bar/baz` were present, the
-  // `/foo/bar/baz` watcher would be signalled instead.)
-  //
-  // Our custom macOS implementation replicates this incorrect behavior so that
-  // we can handle this case uniformly in this one place.
-  bool hasSecondMatch = false;
-  efsw::WatchID secondHandle;
-
-  // If we need to account for this scenario, then the full path will have its
-  // own watcher. Since we only watch directories, this proves that the full
-  // path is a directory.
-  if (HasPath(newPathStr) && action == efsw::Action::Delete) {
-    efsw::WatchID handle = GetHandleForPath(newPathStr);
-    if (watchId != handle) {
-      hasSecondMatch = true;
-      secondHandle = handle;
-    }
-  }
-
   PathWatcherEvent* event = new PathWatcherEvent(action, watchId, newPath, oldPath, realPath);
 
   // TODO: Instead of calling `BlockingCall` once per event, throttle them by
@@ -335,14 +309,6 @@ void PathWatcherListener::handleFileAction(
   // them in batches more efficiently — and for the wrapper JavaScript code to
   // do some elimination of redundant events.
   status = tsfn.BlockingCall(event, ProcessEvent);
-
-  if (hasSecondMatch && status == napi_ok) {
-    // In the rare case of the scenario described above, we have a second
-    // callback invocation to make with a second event. Luckily, the only thing
-    // that changes about the event is the handle!
-    PathWatcherEvent* secondEvent = new PathWatcherEvent(action, secondHandle, newPath, oldPath, realPath);
-    tsfn.BlockingCall(secondEvent, ProcessEvent);
-  }
 
   tsfn.Release();
   if (status != napi_ok) {

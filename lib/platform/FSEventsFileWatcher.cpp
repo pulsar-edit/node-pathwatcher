@@ -359,6 +359,11 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
       // later in the listener (with identical cross-platform code), and it
       // allows us to choose a single winner here in all cases, simplifying the
       // implementation further.
+      //
+      // NOTE: `efsw` currently does not detect a directory’s deletion when
+      // that directory is the one being watched. For consistency, we'll try
+      // to make this custom `FileWatcher` instance behave the same way.
+      //
       std::lock_guard<std::mutex> lock(mapMutex);
       auto itpth = pathsToHandles.find(PathWithoutFileName(event.path, false));
       if (itpth != pathsToHandles.end()) {
@@ -386,6 +391,16 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
           continue;
         }
       }
+    }
+
+    // Whether this event is happening to the directory itself or one of its
+    // children.
+    bool isExactMatch = PathsAreEqual(event.path, path);
+
+    if (event.flags & kFSEventStreamEventFlagItemRemoved && isExactMatch) {
+      // This is a directory's own deletion. Ignore it for consistency with
+      // other implementations!
+      continue;
     }
 
     std::string dirPath(PathWithoutFileName(event.path));
