@@ -26,6 +26,10 @@ static std::string NormalizePath(std::string path) {
   return path + PATH_SEPARATOR;
 }
 
+static bool PathsAreEqual(std::string pathA, std::string pathB) {
+  return NormalizePath(pathA) == NormalizePath(pathB);
+}
+
 std::string PrecomposeFileName(const std::string& name) {
 	CFStringRef cfStringRef = CFStringCreateWithCString(
     kCFAllocatorDefault,
@@ -76,6 +80,7 @@ bool PathExists(const std::string& path) {
 }
 
 bool PathStartsWith(const std::string& str, const std::string& prefix) {
+  if (PathsAreEqual(str, prefix)) return true;
   if (prefix.length() > str.length()) {
     return false;
   }
@@ -283,11 +288,17 @@ void FSEventsFileWatcher::sendFileAction(
   );
 }
 
+struct FileEventMatch {
+  efsw::WatchID handle;
+  std::string path;
+};
+
 void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
   size_t esize = events.size();
 
   for (size_t i = 0; i < esize; i++) {
     FSEvent& event = events[i];
+    std::vector<FileEventMatch> matches;
 
     if (event.flags & (
       kFSEventStreamEventFlagUserDropped |
@@ -299,94 +310,147 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
       kFSEventStreamEventFlagRootChanged
     )) continue;
 
-    efsw::WatchID handle;
-    std::string path;
-    bool found = false;
-
+    // Since we aren’t doing recursive watchers, we can seemingly get away with
+    // using the first match we find. In nearly all cases, it’s impossible for
+    // a filesystem event to pertain to more than one watcher.
+    //
+    // But one exception is directory deletion, since that directory _and_ its
+    // parent directory can both be watched, and that would count as a deletion
+    // for the first and a change for the second.
+    //
+    // For that reason, we keep an array of matches, but stop as soon as we
+    // find two matches, since that's the practical maximum.
+    //
+    // NOTE: In extreme situations with lots of paths, this could be a choke
+    // point, since it’s a nested loop. The fact that we’re just doing string
+    // comparisons should keep it fast, but we could optimize further by
+    // pre-normalizing the paths. We could also move to a better data
+    // structure, but better to invest that time in making this library
+    // obsolete in the first place.
     for (const auto& pair: handlesToPaths) {
       std::string normalizedPath = NormalizePath(pair.second);
-      if (!PathStartsWith(event.path, pair.second)) continue;
-      if (event.path.find_last_of(PATH_SEPARATOR) != pair.second.size()) {
+
+      // Filter out everything that doesn’t equal or descend from this path.
+      if (!PathStartsWith(event.path, normalizedPath)) continue;
+
+      // We let this through if (a) it matches our path exactly, or (b) it
+      // refers to a child file/directory of ours (rather than a deeper
+      // descendant.)
+      if (
+        !PathsAreEqual(event.path, normalizedPath) && event.path.find_last_of(PATH_SEPARATOR) != normalizedPath.size() - 1
+      ) {
         continue;
       }
-      found = true;
-      path = pair.second;
-      handle = pair.first;
-      break;
+
+      FileEventMatch match;
+      match.path = pair.second;
+      match.handle = pair.first;
+      matches.push_back(match);
+
+      // TODO: We can probably break after the first match in many situations.
+      // For instance, if we prove this can’t be a directory deletion!
+      if (matches.size() == 2) break;
     }
 
-    if (!found) continue;
+    if (matches.size() == 0) return;
 
     std::string dirPath(PathWithoutFileName(event.path));
     std::string filePath(FileNameFromPath(event.path));
 
-    if (event.flags & (
-      kFSEventStreamEventFlagItemCreated |
-      kFSEventStreamEventFlagItemRemoved |
-      kFSEventStreamEventFlagItemRenamed
-    )) {
-      if (dirPath != path) {
-        dirsChanged.insert(dirPath);
+    size_t msize = matches.size();
+
+    for (size_t i = 0; i < msize; i++) {
+      std::string path(matches[i].path);
+      efsw::WatchID handle(matches[i].handle);
+
+      if (event.flags & (
+        kFSEventStreamEventFlagItemCreated |
+        kFSEventStreamEventFlagItemRemoved |
+        kFSEventStreamEventFlagItemRenamed
+      )) {
+        if (dirPath != path) {
+          dirsChanged.insert(dirPath);
+        }
       }
-    }
 
-    if (event.flags & kFSEventStreamEventFlagItemRenamed) {
-      if (
-        (i + 1 < esize) &&
-        (events[i + 1].flags & kFSEventStreamEventFlagItemRenamed) &&
-        (events[i + 1].inode == event.inode)
-      ) {
-        FSEvent& nEvent = events[i + 1];
-        std::string newDir(PathWithoutFileName(nEvent.path));
-        std::string newFilepath(FileNameFromPath(nEvent.path));
+      // `efsw`‘s’ comment here suggests that you can’t reliably infer order
+      // from these events — so if the same file is marked as added and changed
+      // and deleted in consecutive events, you don't know if it was deleted/
+      // added/modified, modified/deleted/added, etc.
+      //
+      // This is the equivalent logic from `WatcherFSEvents.cpp` because I
+      // don’t trust myself to touch it at all.
+      if (event.flags & kFSEventStreamEventFlagItemRenamed) {
+        // Does the next event also refer to this same file, and is that event
+        // also a rename?
+        if (
+          (i + 1 < esize) &&
+          (events[i + 1].flags & kFSEventStreamEventFlagItemRenamed) &&
+          (events[i + 1].inode == event.inode)
+        ) {
+          // If so, compare this event and the next one to figure out which one
+          // refers to a current file on disk.
+          FSEvent& nEvent = events[i + 1];
+          std::string newDir(PathWithoutFileName(nEvent.path));
+          std::string newFilepath(FileNameFromPath(nEvent.path));
 
-        if (event.path != nEvent.path) {
-          if (dirPath == newDir) {
-            if (
-              !PathExists(event.path) ||
-              0 == strcasecmp(event.path.c_str(), nEvent.path.c_str())
-            ) {
-              // Move from one path to the other.
-              sendFileAction(handle, dirPath, newFilepath, efsw::Actions::Moved, filePath);
+          if (event.path != nEvent.path) {
+            if (dirPath == newDir) {
+              // This is a move within the same directory.
+              if (
+                !PathExists(event.path) ||
+                0 == strcasecmp(event.path.c_str(), nEvent.path.c_str())
+              ) {
+                // Move from one path to the other.
+                sendFileAction(handle, dirPath, newFilepath, efsw::Actions::Moved, filePath);
+              } else {
+                // Move in the opposite direction.
+                sendFileAction(handle, dirPath, filePath, efsw::Actions::Moved, newFilepath);
+              }
             } else {
-              // Move in the opposite direction.
-              sendFileAction(handle, dirPath, filePath, efsw::Actions::Moved, newFilepath);
+              // This is a move from one directory to another, so we'll treat
+              // it as one deletion and one creation.
+              sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
+              sendFileAction(handle, newDir, newFilepath, efsw::Actions::Add);
+
+              if (nEvent.flags & shorthandFSEventsModified) {
+                sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
+              }
             }
           } else {
-            sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
-            sendFileAction(handle, newDir, newFilepath, efsw::Actions::Add);
+            // The file paths are the same, so we'll let another function
+            // untangle it.
+            handleAddModDel(handle, nEvent.flags, nEvent.path, dirPath, filePath);
+          }
 
-            if (nEvent.flags & shorthandFSEventsModified) {
-              sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
+          if (nEvent.flags & (
+            kFSEventStreamEventFlagItemCreated |
+            kFSEventStreamEventFlagItemRemoved |
+            kFSEventStreamEventFlagItemRenamed
+          )) {
+            if (newDir != path) {
+              dirsChanged.insert(newDir);
             }
           }
-        } else {
-          handleAddModDel(handle, nEvent.flags, nEvent.path, dirPath, filePath);
-        }
 
-        if (nEvent.flags & (
-          kFSEventStreamEventFlagItemCreated |
-          kFSEventStreamEventFlagItemRemoved |
-          kFSEventStreamEventFlagItemRenamed
-        )) {
-          if (newDir != path) {
-            dirsChanged.insert(newDir);
+          // Skip the renamed file.
+          i++;
+        } else if (PathExists(event.path)) {
+          // Treat remaining renames as creations when we know the path still
+          // exists…
+          sendFileAction(handle, dirPath, filePath, efsw::Actions::Add);
+
+          if (event.flags & shorthandFSEventsModified) {
+            sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
           }
-        }
-
-        // Skip the renamed file
-        i++;
-      } else if (PathExists(event.path)) {
-        sendFileAction(handle, dirPath, filePath, efsw::Actions::Add);
-
-        if (event.flags && shorthandFSEventsModified) {
-          sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
+        } else {
+          // …and as deletions when we know the path doesn’t still exist.
+          sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
         }
       } else {
-        sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
+        // Ordinary business — new files, changed, files, deleted files.
+        handleAddModDel(handle, event.flags, event.path, dirPath, filePath);
       }
-    } else {
-      handleAddModDel(handle, event.flags, event.path, dirPath, filePath);
     }
   }
 }
@@ -399,6 +463,8 @@ void FSEventsFileWatcher::handleAddModDel(
   std::string& filePath
 ) {
   if (flags & kFSEventStreamEventFlagItemCreated) {
+    // This claims to be a file creation; make sure it exists on disk before
+    // triggering an event.
     if (PathExists(path)) {
       sendFileAction(handle, dirPath, filePath, efsw::Actions::Add);
     }
@@ -409,12 +475,15 @@ void FSEventsFileWatcher::handleAddModDel(
   }
 
   if (flags & kFSEventStreamEventFlagItemRemoved) {
+    // This claims to be a file deletion; make sure it doesn't exist on disk
+    // before triggering an event.
     if (!PathExists(path)) {
       sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
     }
   }
 }
 
+// Private: clean up a handle from both unordered maps.
 void FSEventsFileWatcher::removeHandle(efsw::WatchID handle) {
   auto itp = handlesToPaths.find(handle);
   if (itp != handlesToPaths.end()) {
@@ -427,10 +496,8 @@ void FSEventsFileWatcher::removeHandle(efsw::WatchID handle) {
 }
 
 void FSEventsFileWatcher::process() {
-#ifdef DEBUG
-  std::cout << "FSEventsFileWatcher::process?" << std::endl;
-#endif
-
+  // We are very careful in this function to ensure that `FSEventsFileWatcher`
+  // doesn’t finalize while this is happening.
   if (!isValid || pendingDestruction) return;
   {
     std::unique_lock<std::mutex> lock(processingMutex);
@@ -449,25 +516,26 @@ void FSEventsFileWatcher::process() {
   // Process the copied directories
   for (const auto& dir : dirsCopy) {
     if (pendingDestruction) return;
-#ifdef DEBUG
-    std::cout << "Changed:" << dir << std::endl;
-#endif
 
     efsw::WatchID handle;
     std::string path;
     bool found = false;
 
     for (const auto& pair: handlesToPaths) {
-      // std::string normalizedPath = NormalizePath(pair.second);
       if (!PathStartsWith(dir, pair.second)) continue;
-      if (dir.find_last_of(PATH_SEPARATOR) != pair.second.size()) {
+
+      if (
+        !PathsAreEqual(dir, pair.second) && dir.find_last_of(PATH_SEPARATOR) != pair.second.size() - 1
+      ) {
         continue;
       }
+
       found = true;
       path = pair.second;
       handle = pair.first;
       break;
     }
+
     if (!found) continue;
 
     sendFileAction(
@@ -483,6 +551,8 @@ void FSEventsFileWatcher::process() {
   dirsChanged.clear();
 }
 
+// Start a new FSEvent stream and promote it to the “active” stream after it
+// starts.
 bool FSEventsFileWatcher::startNewStream() {
   // Build a list of all current watched paths. We'll eventually pass this to
   // `FSEventStreamCreate`.

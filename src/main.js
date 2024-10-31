@@ -1,19 +1,13 @@
 let binding;
-// console.log('ENV:', process.NODE_ENV);
-// if (process.NODE_ENV === 'DEV') {
-  try {
-    binding = require('../build/Debug/pathwatcher.node');
-  } catch (err) {
-    binding = require('../build/Release/pathwatcher.node');
-  }
-// } else {
-//   binding = require('../build/Release/pathwatcher.node');
-// }
+try {
+  binding = require('../build/Debug/pathwatcher.node');
+} catch (err) {
+  binding = require('../build/Release/pathwatcher.node');
+}
 
 const fs = require('fs');
 const path = require('path');
 const { Emitter, Disposable, CompositeDisposable } = require('event-kit');
-// const { NativeWatcherRegistry } = require('./native-watcher-registry');
 
 let initialized = false;
 
@@ -71,6 +65,10 @@ class NativeWatcher {
 
   // Given a path, returns whatever existing active `NativeWatcher` is already
   // watching that path, or creates one if it doesn’t yet exist.
+  //
+  // It is important that we don’t ask the bindings to create a new watcher for
+  // a native path that already exists, so this helps us prevent that from
+  // happening.
   static findOrCreate (normalizedPath, options) {
     for (let instance of this.INSTANCES.values()) {
       if (instance.normalizedPath === normalizedPath) {
@@ -80,7 +78,9 @@ class NativeWatcher {
     return new NativeWatcher(normalizedPath, options);
   }
 
-  // Returns the number of active `NativeWatcher` instances.
+  // Returns the number of active `NativeWatcher` instances. Depending on
+  // platform, a higher number may or may not be more demanding of the
+  // operating system.
   static get instanceCount() {
     return this.INSTANCES.size;
   }
@@ -407,11 +407,19 @@ class PathWatcher {
       return;
     }
 
+
     switch (newEvent.action) {
       case 'rename':
+        // This event needs no alteration… as long as it relates to the file
+        // we care about.
+        if (!eventPathIsEqual && !eventOldPathIsEqual) return;
+        break;
+      case 'change':
       case 'delete':
       case 'create':
-        // These events need no alteration.
+        // These events need no alteration… as long as they relate to the file
+        // we care about.
+        if (!eventPathIsEqual) return;
         break;
       case 'child-create':
         if (!this.isWatchingParent) {
