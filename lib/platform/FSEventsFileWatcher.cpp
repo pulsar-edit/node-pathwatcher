@@ -11,10 +11,10 @@
 // streams created in comparison to `efsw`’s approach of using one stream per
 // watched path.
 
-// NOTE: Lots of these are duplications and alternate versions of functions
-// that are already present in `efsw`. We could use the `efsw` versions
-// instead, but it feels like a good idea to minimize the amount of
-// cross-pollination here.
+// NOTE: Lots of these utility functions are duplications and alternate
+// versions of functions that are already present in `efsw`. We could use the
+// `efsw` versions instead, but it feels like a good idea to minimize the
+// amount of cross-pollination here.
 
 int shorthandFSEventsModified = kFSEventStreamEventFlagItemFinderInfoMod |
   kFSEventStreamEventFlagItemModified |
@@ -74,7 +74,8 @@ std::string PrecomposeFileName(const std::string& name) {
 	return result;
 }
 
-// Returns whether `path` currently exists on disk.
+// Returns whether `path` currently exists on disk. Does not distiguish between
+// files and directories.
 bool PathExists(const std::string& path) {
   struct stat buffer;
   return (stat(path.c_str(), &buffer) == 0);
@@ -87,9 +88,9 @@ bool PathStartsWith(const std::string& str, const std::string& prefix) {
   if (prefix.length() > str.length()) {
     return false;
   }
-  auto normalizedPrefix = NormalizePath(prefix);
   // We ensure `prefix` ends with a path separator so we don't mistakenly think
   // that `/foo/barbaz` descends from `/foo/bar`.
+  auto normalizedPrefix = NormalizePath(prefix);
   return str.compare(0, normalizedPrefix.length(), normalizedPrefix) == 0;
 }
 
@@ -100,13 +101,15 @@ void DirRemoveSlashAtEnd (std::string& dir) {
   }
 }
 
-// Given `/foo/bar/baz.txt`, returns `/foo/bar` (with or without a trailing
-// slash as desired).
+// Given `/foo/bar/baz.txt`, returns `/foo/bar` (or `/foo/bar/`).
+//
+// Given `/foo/bar/baz`, also returns `/foo/bar` (or `/foo/bar/`). In other
+// words: it works like Node’s `path.dirname` and strips the last segment of a
+// path.
 std::string PathWithoutFileName(std::string filepath, bool keepTrailingSeparator) {
   DirRemoveSlashAtEnd(filepath);
 
   size_t pos = filepath.find_last_of(PATH_SEPARATOR);
-
   if (pos != std::string::npos) {
     return filepath.substr(0, keepTrailingSeparator ? pos + 1 : pos);
   }
@@ -120,6 +123,10 @@ std::string PathWithoutFileName(std::string filepath) {
 }
 
 // Given `/foo/bar/baz.txt`, returns `baz.txt`.
+//
+// Given `/foo/bar/baz`, returns `baz`.
+//
+// Equivalent to Node’s `path.basename`.
 std::string FileNameFromPath(std::string filepath) {
   DirRemoveSlashAtEnd(filepath);
 
@@ -133,8 +140,8 @@ std::string FileNameFromPath(std::string filepath) {
 
 // Borrowed from `efsw`. Don’t ask me to explain it.
 static std::string convertCFStringToStdString( CFStringRef cfString ) {
-	// Try to get the C string pointer directly
-	const char* cStr = CFStringGetCStringPtr( cfString, kCFStringEncodingUTF8 );
+  // Try to get the C string pointer directly.
+	const char* cStr = CFStringGetCStringPtr(cfString, kCFStringEncodingUTF8);
 
 	if (cStr) {
     // If the pointer is valid, directly return a `std::string` from it.
@@ -168,9 +175,6 @@ static std::string convertCFStringToStdString( CFStringRef cfString ) {
 // Empty constructor.
 
 FSEventsFileWatcher::~FSEventsFileWatcher() {
-#ifdef DEBUG
-  std::cout << "[destroying] FSEventsFileWatcher!" << std::endl;
-#endif
   pendingDestruction = true;
   // Defer cleanup until we can finish processing file events.
   std::unique_lock<std::mutex> lock(processingMutex);
@@ -192,9 +196,6 @@ efsw::WatchID FSEventsFileWatcher::addWatch(
   // The `_useRecursion` flag is ignored; it's present for API compatibility.
   bool _useRecursion
 ) {
-#ifdef DEBUG
-  std::cout << "FSEventsFileWatcher::addWatch" << directory << std::endl;
-#endif
   efsw::WatchID handle = nextHandleID++;
   {
     std::lock_guard<std::mutex> lock(mapMutex);
@@ -217,9 +218,6 @@ efsw::WatchID FSEventsFileWatcher::addWatch(
 void FSEventsFileWatcher::removeWatch(
   efsw::WatchID handle
 ) {
-#ifdef DEBUG
-  std::cout << "FSEventsFileWatcher::removeWatch" << handle << std::endl;
-#endif
   auto remainingCount = removeHandle(handle);
 
   if (remainingCount == 0) {
@@ -248,10 +246,6 @@ void FSEventsFileWatcher::FSEventCallback(
   const FSEventStreamEventFlags eventFlags[],
   const FSEventStreamEventId eventIds[]
 ) {
-#ifdef DEBUG
-  std::cout << "FSEventsFileWatcher::FSEventCallback" << std::endl;
-#endif
-
   FSEventsFileWatcher* instance = static_cast<FSEventsFileWatcher*>(userData);
   if (!instance->isValid) return;
 
@@ -338,31 +332,26 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
       // How do we match up this path change to the watcher that cares about
       // it?
       //
-      // Since we do only non-recursive watching, there are a maximum of two
-      // watchers that can care about something — and 99% of cases will involve
-      // a single such watcher. This vastly simplifies our implementation
-      // compared to `efsw`’s — since it has to care about the possibility of
-      // recursive watchers, one file change can correspond to arbitrarily many
-      // watchers.
+      // Since we do only non-recursive watching, each filesystem event can
+      // belong to one watcher at most. This vastly simplifies our
+      // implementation compared to `efsw`’s — since it has to care about the
+      // possibility of recursive watchers, one file change can correspond to
+      // arbitrarily many watchers.
       //
       // For that reason, we can do a simple map lookup. First we try the
       // path’s parent directory; if that’s not successful, we try the full
       // path. One of these is (for practical purposes) guaranteed to find a
       // watcher.
       //
-      // NOTE: What about the 1% edge case? `efsw` has an incorrect behavior
-      // here: in the rare case of a watcher existing on both a parent
-      // directory and a child directory, it will choose only the parent when
-      // the child is deleted.
-      //
-      // This is incorrect, but it's _conveniently_ incorrect! We can fix it
-      // later in the listener (with identical cross-platform code), and it
-      // allows us to choose a single winner here in all cases, simplifying the
-      // implementation further.
-      //
       // NOTE: `efsw` currently does not detect a directory’s deletion when
-      // that directory is the one being watched. For consistency, we'll try
-      // to make this custom `FileWatcher` instance behave the same way.
+      // that directory is the one being watched. For consistency, we'll try to
+      // make this custom `FileWatcher` instance behave the same way.
+      //
+      // This works in our favor because it means that there can be only one
+      // watcher responding to this filesystem event. The only way to find
+      // lifecycle events on directories themselves — deletions, renames,
+      // creations — is to listen on the directory’s parent, which neatly
+      // mirrors the situation with files.
       //
       std::lock_guard<std::mutex> lock(mapMutex);
       auto itpth = pathsToHandles.find(PathWithoutFileName(event.path, false));
@@ -373,34 +362,10 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
         path = itpth->first;
         handle = itpth->second;
       } else {
-        // Otherwise, we check if the path has a watcher of its own. This only
-        // applies when the path is itself a directory and only when the
-        // directory is being deleted (since we don’t let you watch a directory
-        // before it exists).
-        //
-        // If _both_ the parent directory _and_ the child directory are being
-        // watched in this scenario, we won’t get this far. We'll still
-        // notify both watchers, but that gets handled in `core.cc`.
-        itpth = pathsToHandles.find(event.path);
-        if (itpth != pathsToHandles.end()) {
-          path = itpth->first;
-          handle = itpth->second;
-        } else {
-          // We couldn't find a handle for this path. This is odd, but it’s
-          // not a big deal.
-          continue;
-        }
+        // Couldn't match this up to a watcher. A bit unusual, but not
+        // catastrophic.
+        continue;
       }
-    }
-
-    // Whether this event is happening to the directory itself or one of its
-    // children.
-    bool isExactMatch = PathsAreEqual(event.path, path);
-
-    if (event.flags & kFSEventStreamEventFlagItemRemoved && isExactMatch) {
-      // This is a directory's own deletion. Ignore it for consistency with
-      // other implementations!
-      continue;
     }
 
     std::string dirPath(PathWithoutFileName(event.path));
@@ -411,18 +376,20 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
       kFSEventStreamEventFlagItemRemoved |
       kFSEventStreamEventFlagItemRenamed
     )) {
-      if (dirPath != path) {
+      if (!PathsAreEqual(dirPath, path)) {
         dirsChanged.insert(dirPath);
       }
     }
 
-    // `efsw`‘s’ comment here suggests that you can’t reliably infer order
-    // from these events — so if the same file is marked as added and changed
-    // and deleted in consecutive events, you don't know if it was deleted/
+    // `efsw`‘s comment here suggests that you can’t reliably infer order from
+    // these events — so if the same file is marked as added and changed and
+    // deleted in consecutive events, you don't know if it was deleted/
     // added/modified, modified/deleted/added, etc.
     //
-    // This is the equivalent logic from `WatcherFSEvents.cpp` because I
-    // don’t trust myself to touch it at all.
+    // This is the equivalent logic from `WatcherFSEvents.cpp` because I don’t
+    // trust myself to touch it at all. The goal is largely to infer an
+    // ordering to the extent possible based on whether the path exists at the
+    // moment.
     if (event.flags & kFSEventStreamEventFlagItemRenamed) {
       // Does the next event also refer to this same file, and is that event
       // also a rename?
@@ -471,7 +438,7 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
           kFSEventStreamEventFlagItemRemoved |
           kFSEventStreamEventFlagItemRenamed
         )) {
-          if (newDir != path) {
+          if (!PathsAreEqual(newDir, path)) {
             dirsChanged.insert(newDir);
           }
         }
@@ -563,34 +530,24 @@ void FSEventsFileWatcher::process() {
     dirsChanged.clear();
   }
 
-  // Process the copied directories
+  // Process the copied directories.
   for (const auto& dir : dirsCopy) {
     if (pendingDestruction) return;
 
     efsw::WatchID handle;
     std::string path;
-    bool found = false;
 
     {
       std::lock_guard<std::mutex> lock(mapMutex);
-      for (const auto& pair: handlesToPaths) {
-        if (!PathStartsWith(dir, pair.second)) continue;
-
-        if (
-          !PathsAreEqual(dir, pair.second) && dir.find_last_of(PATH_SEPARATOR) != pair.second.size() - 1
-        ) {
-          continue;
-        }
-
-        found = true;
-        path = pair.second;
-        handle = pair.first;
-        break;
-      }
+      auto itpth = pathsToHandles.find(PathWithoutFileName(dir, false));
+      if (itpth == pathsToHandles.end()) continue;
+      path = itpth->first;
+      handle = itpth->second;
     }
 
-    if (!found) continue;
-
+    // TODO: It is questionable whether these file events are useful or
+    // actionable, since the listener will fail to respond to them if they come
+    // from an unexpected path on disk.
     sendFileAction(
       handle,
       PathWithoutFileName(dir),
@@ -600,8 +557,6 @@ void FSEventsFileWatcher::process() {
 
     if (pendingDestruction) return;
   }
-
-  dirsChanged.clear();
 }
 
 // Start a new FSEvent stream and promote it to the “active” stream after it

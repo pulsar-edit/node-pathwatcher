@@ -16,11 +16,7 @@ public:
     long flags,
     uint64_t id,
     uint64_t inode = 0
-  ): path(path), flags(flags), id(id), inode(inode) {
-#ifdef DEBUG
-  std::cout << "[creating] FSEventsFileWatcher!" << std::endl;
-#endif
-  }
+  ): path(path), flags(flags), id(id), inode(inode) {}
 
   std::string path;
   long flags;
