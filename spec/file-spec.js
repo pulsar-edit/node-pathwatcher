@@ -161,33 +161,35 @@ describe('File', () => {
     });
   });
 
+  // Since all `NativeWatcher` instance watch directories, two different
+  // `PathWatcher` instances for two different files in the same directory will
+  // end up sharing a `NativeWatcher`. This test ensures that `PathWatcher`s
+  // know how to tell their own events apart from those of others.
   describe('when a native watcher is shared by several PathWatchers', () => {
-    let nephewPath = path.join(__dirname, 'fixtures', 'foo', 'bar.txt');
-    let nephewFile = new File(nephewPath);
+    let siblingPath = path.join(__dirname, 'fixtures', 'file-test-a.txt');
+    let siblingFile = new File(siblingPath);
     beforeEach(() => {
-      if (!fs.existsSync(path.dirname(nephewPath))) {
-        fs.mkdirSync(path.dirname(nephewPath));
-      }
-      if (!fs.existsSync(nephewPath)) {
-        fs.writeFileSync(nephewPath, 'initial');
+      if (!fs.existsSync(siblingPath)) {
+        fs.writeFileSync(siblingPath, 'initial');
       }
     });
 
     afterEach(() => {
-      if (fs.existsSync(path.dirname(nephewPath))) {
-        fs.rmSync(path.dirname(nephewPath), { recursive: true });
+      if (fs.existsSync(siblingPath)) {
+        fs.rmSync(siblingPath);
       }
     })
+
     it('does not cross-fire events', async () => {
-      let changeHandler1 = jasmine.createSpy('rootChangeHandler');
+      let changeHandler1 = jasmine.createSpy('originalChangeHandler');
       file.onDidChange(changeHandler1);
       await wait(100);
 
-      let changeHandler2 = jasmine.createSpy('nephewChangeHandler');
-      nephewFile.onDidChange(changeHandler2);
+      let changeHandler2 = jasmine.createSpy('siblingChangeHandler');
+      siblingFile.onDidChange(changeHandler2);
 
       await wait(100);
-      fs.writeFileSync(nephewPath, 'changed!');
+      fs.writeFileSync(siblingPath, 'changed!');
 
       await condition(() => changeHandler2.calls.count() > 0);
       expect(changeHandler1).not.toHaveBeenCalled();
