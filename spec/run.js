@@ -15,10 +15,12 @@ if (process.argv[2]) {
 }
 jasmine.loadConfig(CONFIG);
 
-const MAX_DURATION = 10 * 1000;
+// This value refers to the amount of time we allow the script to run _after_
+// the tests are done.
+const MAX_DURATION_MS = 10 * 1000;
 
 function bail () {
-  console.error(`Script ran for more than ${MAX_DURATION / 1000} seconds after the end of the suite; there's an open handle somewhere!`);
+  console.error(`Script ran for more than ${MAX_DURATION_MS / 1000} seconds after the end of the suite; there's an open handle somewhere!`);
   process.exit(2);
 }
 
@@ -30,7 +32,7 @@ function bail () {
   await jasmine.execute();
   // Wait to see if the script is still running MAX_DURATION milliseconds from
   // now…
-  let failsafe = setTimeout(bail, MAX_DURATION);
+  let failsafe = setTimeout(bail, MAX_DURATION_MS);
   // …but `unref` ourselves so that we're not the reason why the script keeps
   // running!
   failsafe.unref();

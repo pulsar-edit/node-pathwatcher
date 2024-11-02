@@ -12,6 +12,7 @@ async function wait (ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+// Lazy-load the main `PathWatcher` import to prevent circular references.
 let PathWatcher;
 
 // Extended: Represents an individual file that can be watched, read from, and

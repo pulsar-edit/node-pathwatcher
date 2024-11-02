@@ -6,23 +6,25 @@
 // script segfaults or runs indefinitely.
 const spawnThread = require('./worker');
 
-const NUM_WORKERS = 3;
-const MAX_DURATION = 15 * 1000;
+const NUM_WORKERS = 1;
+const MAX_DURATION_MS = 15 * 1000;
 
-// Pick one of the workers to return earlier than the others.
+// Pick one of the workers to return earlier than the others. If this causes
+// the others to fail or misbehave, it suggests that cleanup logic for an
+// environment is not truly context-safe.
 let earlyReturn = null;
 if (NUM_WORKERS > 1) {
   earlyReturn = Math.floor(Math.random() * NUM_WORKERS);
 }
 
 function bail () {
-  console.error(`Script ran for more than ${MAX_DURATION / 1000} seconds; there's an open handle somewhere!`);
+  console.error(`Script ran for more than ${MAX_DURATION_MS / 1000} seconds; there's an open handle somewhere!`);
   process.exit(2);
 }
 
-// Wait to see if the script is still running MAX_DURATION milliseconds from
+// Wait to see if the script is still running MAX_DURATION_MS milliseconds from
 // now…
-let failsafe = setTimeout(bail, MAX_DURATION);
+let failsafe = setTimeout(bail, MAX_DURATION_MS);
 // …but `unref` ourselves so that we're not the reason why the script keeps
 // running!
 failsafe.unref();
