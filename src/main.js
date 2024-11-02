@@ -631,10 +631,6 @@ function getWatchedPaths () {
   return result
 }
 
-function getNativeWatcherCount() {
-  return NativeWatcher.INSTANCES.size;
-}
-
 const File = require('./file');
 const Directory = require('./directory');
 
@@ -642,7 +638,6 @@ module.exports = {
   watch,
   closeAllWatchers,
   getWatchedPaths,
-  getNativeWatcherCount,
   File,
   Directory
 };
