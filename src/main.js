@@ -466,12 +466,16 @@ class PathWatcher {
           // inside of the directory.
           if (
             path.dirname(event.path) === this.normalizedPath ||
-              path.dirname(event.oldPath) === this.normalizedPath
+            path.dirname(event.oldPath) === this.normalizedPath
           ) {
             // This is a direct child of the directory, so we'll fire an
             // event.
             newEvent.action = 'change';
-            newEvent.path = '';
+            // NOTE: Setting a specific path here (instead of the standard
+            // empty string as with other code paths) fixes a behavior
+            // regression in Pulsar. The other code paths might also be
+            // incorrect; needs investigation.
+            newEvent.path = event.path;
           } else {
             // Changes in ancestors or descendants do not concern us, so
             // we'll return early.
