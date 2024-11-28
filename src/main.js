@@ -471,11 +471,7 @@ class PathWatcher {
             // This is a direct child of the directory, so we'll fire an
             // event.
             newEvent.action = 'change';
-            // NOTE: Setting a specific path here (instead of the standard
-            // empty string as with other code paths) fixes a behavior
-            // regression in Pulsar. The other code paths might also be
-            // incorrect; needs investigation.
-            newEvent.path = event.path;
+            newEvent.path = '';
           } else {
             // Changes in ancestors or descendants do not concern us, so
             // we'll return early.
@@ -544,11 +540,12 @@ class PathWatcher {
       return;
     }
 
-    if (eventPathIsEqual) {
-      // Specs require that a `delete` action carry a path of `null`; other
-      // actions should carry an empty path. (Weird decisions, but we can
-      // live with them.)
-      newEvent.path = newEvent.action === 'delete' ? null : '';
+    if (eventPathIsEqual && newEvent.action === 'delete') {
+      // Specs require that a `delete` action carry a path of `null`.
+      //
+      // NOTE: We might want to revisit this and change what the specs test!
+      newEvent.path = null;
+      // newEvent.path = newEvent.action === 'delete' ? null : newEvent.path;
     }
     // console.debug(
     //   'FINAL EVENT ACTION:',
