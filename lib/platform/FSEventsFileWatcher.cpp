@@ -565,8 +565,8 @@ bool FSEventsFileWatcher::startNewStream() {
   // Build a list of all current watched paths. We'll eventually pass this to
   // `FSEventStreamCreate`.
   std::vector<CFStringRef> cfStrings;
-  std::lock_guard<std::mutex> lock(mapMutex);
   {
+    std::lock_guard<std::mutex> lock(mapMutex);
     for (const auto& pair : handlesToPaths) {
       CFStringRef cfStr = CFStringCreateWithCString(
         kCFAllocatorDefault,
