@@ -164,6 +164,7 @@ void PathWatcherListener::AddPath(PathTimestampPair pair, efsw::WatchID handle) 
 // Remove metadata for a given watch ID.
 void PathWatcherListener::RemovePath(efsw::WatchID handle) {
   std::string path;
+  if (isShuttingDown) return;
   {
     std::lock_guard<std::mutex> lock(pathsMutex);
     auto it = paths.find(handle);
@@ -442,6 +443,14 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
 // Unwatch the given handle.
 Napi::Value PathWatcher::Unwatch(const Napi::CallbackInfo& info) {
   auto env = info.Env();
+
+  if (!isWatching) {
+    // We're not listening right now, so this is redundant at best and invalid
+    // at worst. Return early so we don't try to use resources that have
+    // already been finalized.
+    return env.Undefined();
+  }
+
   if (!IsV8ValueWatcherHandle(info[0])) {
     Napi::TypeError::New(env, "Argument must be a number").ThrowAsJavaScriptException();
     return env.Null();
