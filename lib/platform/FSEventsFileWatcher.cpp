@@ -494,6 +494,9 @@ void FSEventsFileWatcher::handleAddModDel(
 
 // Private: clean up a handle from both unordered maps.
 size_t FSEventsFileWatcher::removeHandle(efsw::WatchID handle) {
+  // If we're destroyed (or about to destroy ourselves), don't try to do
+  // anything to these maps; the mutex lock will fail.
+  if (!isValid || pendingDestruction) return 0;
   std::lock_guard<std::mutex> lock(mapMutex);
   std::string path;
   auto itp = handlesToPaths.find(handle);
