@@ -128,11 +128,6 @@ private:
   std::unordered_map<std::string, efsw::WatchID> pathsToHandles;
 };
 
-
-#define WatcherHandleToV8Value(h, e) Napi::Number::New(e, h)
-#define V8ValueToWatcherHandle(v) v.Int32Value()
-#define IsV8ValueWatcherHandle(v) v.IsNumber()
-
 class PathWatcher : public Napi::Addon<PathWatcher> {
 public:
   PathWatcher(Napi::Env env, Napi::Object exports);

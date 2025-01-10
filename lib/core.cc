@@ -39,6 +39,21 @@ static bool PredatesWatchStart(struct timespec fileSpec, timeval startTime) {
 }
 #endif
 
+static Napi::BigInt WatcherHandleToBigInt(Napi::Env env, efsw::WatchID handle) {
+  int64_t handleAsInt64 = static_cast<int64_t>(handle);
+  return Napi::BigInt::New(env, handleAsInt64);
+}
+
+static efsw::WatchID BigIntToWatcherHandle(Napi::BigInt value) {
+  // JavaScript `BigInt`s can be arbitrarily large, so they may not fit inside
+  // a `long` or `int64_t`. But if this value needs truncation, something shady
+  // is going on, since that value certainly didn't come from us. We conform to
+  // the API here, but we don't need to check whether the value was truncated.
+  bool lossless = false;
+  efsw::WatchID handle = value.Int64Value(&lossless);
+  return handle;
+}
+
 static std::string EventType(efsw::Action action, bool isChild) {
   switch (action) {
     case efsw::Actions::Add:
@@ -123,7 +138,7 @@ static void ProcessEvent(
   try {
     callback.Call({
       Napi::String::New(env, eventName),
-      Napi::Number::New(env, event->handle),
+      WatcherHandleToBigInt(env, event->handle),
       Napi::String::New(env, newPath),
       Napi::String::New(env, oldPath)
     });
@@ -434,10 +449,14 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  // The `watch` function returns a JavaScript number much like `setTimeout` or
+  // The `watch` function returns a number much like `setTimeout` or
   // `setInterval` would; this is the handle that the wrapper JavaScript can
   // use to unwatch the path later.
-  return WatcherHandleToV8Value(handle, env);
+  //
+  // But EFSW defines a WatchID as a `long`, which means it's 64-bits and
+  // therefore possibly larger than the JS `Number` type can handle. We'll use
+  // `BigInt`s instead because we live in the future.
+  return WatcherHandleToBigInt(env, handle);
 }
 
 // Unwatch the given handle.
@@ -451,14 +470,14 @@ Napi::Value PathWatcher::Unwatch(const Napi::CallbackInfo& info) {
     return env.Undefined();
   }
 
-  if (!IsV8ValueWatcherHandle(info[0])) {
-    Napi::TypeError::New(env, "Argument must be a number").ThrowAsJavaScriptException();
+  if (!info[0].IsBigInt()) {
+    Napi::TypeError::New(env, "Argument must be a BigInt").ThrowAsJavaScriptException();
     return env.Null();
   }
 
   if (!listener) return env.Undefined();
 
-  WatcherHandle handle = V8ValueToWatcherHandle(info[0].As<Napi::Number>());
+  efsw::WatchID handle = BigIntToWatcherHandle(info[0].As<Napi::BigInt>());
 
   // EFSW doesn’t mind if we give it a handle that it doesn’t recognize; it’ll
   // just silently do nothing.
@@ -472,9 +491,6 @@ Napi::Value PathWatcher::Unwatch(const Napi::CallbackInfo& info) {
   listener->RemovePath(handle);
 
   if (listener->IsEmpty()) {
-#ifdef DEBUG
-    std::cout << "Cleaning up!" << std::endl;
-#endif
     Cleanup(env);
     isWatching = false;
   }
