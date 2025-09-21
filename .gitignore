@@ -1,8 +1,11 @@
+.DS_Store
 *.swp
 build/
 node_modules/
-lib/
 .node-version
+.tool-versions
 npm-debug.log
 api.json
 package-lock.json
+.cache/
+compile_commands.json

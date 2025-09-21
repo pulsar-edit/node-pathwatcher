@@ -1,0 +1,18 @@
+{
+  "spec_dir": ".",
+
+  "spec_files": [
+    "spec/*-spec.js"
+  ],
+
+  "helpers": [
+    "spec/helpers/all.js"
+  ],
+
+  "env": {
+    "failSpecWithNoExpectations": false,
+    "stopSpecOnExpectationFailure": false,
+    "stopOnSpecFailure": false,
+    "random": true
+  }
+}

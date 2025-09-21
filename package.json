@@ -1,5 +1,5 @@
 {
-  "main": "./lib/main",
+  "main": "./src/main",
   "name": "pathwatcher",
   "description": "Watch files and directories for changes",
   "version": "8.1.2",
@@ -9,6 +9,9 @@
       "url": "http://github.com/atom/node-pathwatcher/raw/master/LICENSE.md"
     }
   ],
+  "engines": {
+    "node": ">=14"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/atom/node-pathwatcher.git"
@@ -18,20 +21,15 @@
   },
   "homepage": "http://atom.github.io/node-pathwatcher",
   "scripts": {
-    "prepublish": "grunt prepublish",
-    "test": "grunt test"
+    "test": "node spec/run.js",
+    "test-context-safety": "node spec/context-safety.js",
+    "clean": "node scripts/clean.js"
   },
   "devDependencies": {
-    "grunt": "~0.4.1",
-    "grunt-contrib-coffee": "~0.9.0",
-    "grunt-cli": "~0.1.7",
-    "grunt-shell": "~0.2.2",
-    "jasmine-tagged": "^1.1",
+    "jasmine": "^5.3.1",
+    "node-addon-api": "^8.1.0",
     "rimraf": "~2.2.0",
-    "node-cpplint": "~0.1.5",
-    "grunt-coffeelint": "git+https://github.com/atom/grunt-coffeelint.git",
-    "temp": "~0.9.0",
-    "grunt-atomdoc": "^1.0"
+    "temp": "~0.9.0"
   },
   "dependencies": {
     "async": "~0.2.10",
@@ -40,7 +38,6 @@
     "fs-plus": "^3.0.0",
     "grim": "^2.0.1",
     "iconv-lite": "~0.4.4",
-    "nan": "^2.10.0",
     "underscore-plus": "~1.x"
   }
 }
