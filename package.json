@@ -10,16 +10,16 @@
     }
   ],
   "engines": {
-    "node": ">=14"
+    "node": ">=20"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/atom/node-pathwatcher.git"
+    "url": "https://github.com/pulsar-edit/node-pathwatcher.git"
   },
   "bugs": {
-    "url": "https://github.com/atom/node-pathwatcher/issues"
+    "url": "https://github.com/pulsar-edit/node-pathwatcher/issues"
   },
-  "homepage": "http://atom.github.io/node-pathwatcher",
+  "homepage": "https://github.com/pulsar-edit/node-pathwatcher/",
   "scripts": {
     "test": "node spec/run.js",
     "test-context-safety": "node spec/context-safety.js",

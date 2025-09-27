@@ -3,4 +3,6 @@ spec/
 scripts/
 .npmignore
 .node-version
+.tool-versions
 npm-debug.log
+compile_commands.json
