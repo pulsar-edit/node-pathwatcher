@@ -6,6 +6,5 @@ node_modules/
 .tool-versions
 npm-debug.log
 api.json
-package-lock.json
 .cache/
 compile_commands.json
