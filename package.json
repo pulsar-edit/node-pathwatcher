@@ -1,12 +1,12 @@
 {
   "main": "./src/main",
-  "name": "pathwatcher",
+  "name": "@pulsar-edit/pathwatcher",
   "description": "Watch files and directories for changes",
   "version": "9.0.0",
   "licenses": [
     {
       "type": "MIT",
-      "url": "http://github.com/atom/node-pathwatcher/raw/master/LICENSE.md"
+      "url": "http://github.com/pulsar-edit/node-pathwatcher/raw/master/LICENSE.md"
     }
   ],
   "engines": {
