@@ -250,8 +250,12 @@ class File {
   //
   // * `path` {String} The new path to set; should be absolute.
   setPath (path) {
+    let pathDidChange = path !== this.path;
     this.path = path;
     this.realPath = null;
+    if (pathDidChange && this.watchSubscription) {
+      this.unsubscribeFromNativeChangeEvents();
+    }
   }
 
   // Public: Returns a {Promise} that resolves to this file’s completely
@@ -482,6 +486,7 @@ class File {
         return;
       case 'rename':
         this.setPath(eventPath);
+        this.subscribeToNativeChangeEvents();
         if (Grim.includeDeprecatedAPIs) {
           this.emit('moved');
         }
@@ -514,6 +519,8 @@ class File {
 
   subscribeToNativeChangeEvents () {
     PathWatcher ??= require('./main');
+    if (this.watchedPath === this.path) return;
+    this.watchedPath = this.path;
     this.watchSubscription ??= PathWatcher.watch(
       this.path,
       (...args) => {
@@ -526,6 +533,7 @@ class File {
   unsubscribeFromNativeChangeEvents () {
     this.watchSubscription?.close();
     this.watchSubscription &&= null;
+    this.watchedPath &&= null;
   }
 }
 

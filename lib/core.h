@@ -1,15 +1,21 @@
 #pragma once
 
-#include <napi.h>
-#include <string>
+#include "../vendor/efsw/include/efsw/efsw.hpp"
 #include <atomic>
 #include <mutex>
+#include <napi.h>
+#include <string>
 #include <unordered_map>
-#include "../vendor/efsw/include/efsw/efsw.hpp"
 
 #ifdef __APPLE__
+#ifdef USE_KQUEUE
+#include "./platform/KqueueFileWatcher.hpp"
+typedef KqueueFileWatcher FileWatcher;
+#else
 #include "./platform/FSEventsFileWatcher.hpp"
-#endif
+typedef FSEventsFileWatcher FileWatcher;
+#endif // USE_KQUEUE
+#endif // __APPLE__
 
 #ifndef _WIN32
 #include <sys/time.h>
@@ -21,9 +27,7 @@
 #define PATH_SEPARATOR '/'
 #endif
 
-#ifdef __APPLE__
-typedef FSEventsFileWatcher FileWatcher;
-#else
+#ifndef __APPLE__
 typedef efsw::FileWatcher FileWatcher;
 #endif
 
@@ -53,20 +57,18 @@ struct PathWatcherEvent {
   PathWatcherEvent() = default;
 
   // Constructor
-  PathWatcherEvent(
-    efsw::Action t,
-    efsw::WatchID h,
-    const std::vector<char>& np,
-    const std::vector<char>& op = std::vector<char>(),
-    const std::string& wp = ""
-  ) : type(t), handle(h), new_path(np), old_path(op), watcher_path(wp) {}
+  PathWatcherEvent(efsw::Action t, efsw::WatchID h, const std::vector<char> &np,
+                   const std::vector<char> &op = std::vector<char>(),
+                   const std::string &wp = "")
+      : type(t), handle(h), new_path(np), old_path(op), watcher_path(wp) {}
 
   // Copy constructor
-  PathWatcherEvent(const PathWatcherEvent& other)
-    : type(other.type), handle(other.handle), new_path(other.new_path), old_path(other.old_path), watcher_path(other.watcher_path) {}
+  PathWatcherEvent(const PathWatcherEvent &other)
+      : type(other.type), handle(other.handle), new_path(other.new_path),
+        old_path(other.old_path), watcher_path(other.watcher_path) {}
 
   // Copy assignment operator
-  PathWatcherEvent& operator=(const PathWatcherEvent& other) {
+  PathWatcherEvent &operator=(const PathWatcherEvent &other) {
     if (this != &other) {
       type = other.type;
       handle = other.handle;
@@ -78,12 +80,14 @@ struct PathWatcherEvent {
   }
 
   // Move constructor
-  PathWatcherEvent(PathWatcherEvent&& other) noexcept
-    : type(other.type), handle(other.handle),
-    new_path(std::move(other.new_path)), old_path(std::move(other.old_path)), watcher_path(std::move(other.watcher_path)) {}
+  PathWatcherEvent(PathWatcherEvent &&other) noexcept
+      : type(other.type), handle(other.handle),
+        new_path(std::move(other.new_path)),
+        old_path(std::move(other.old_path)),
+        watcher_path(std::move(other.watcher_path)) {}
 
   // Move assignment operator
-  PathWatcherEvent& operator=(PathWatcherEvent&& other) noexcept {
+  PathWatcherEvent &operator=(PathWatcherEvent &&other) noexcept {
     if (this != &other) {
       type = other.type;
       handle = other.handle;
@@ -95,20 +99,13 @@ struct PathWatcherEvent {
   }
 };
 
-class PathWatcherListener: public efsw::FileWatchListener {
+class PathWatcherListener : public efsw::FileWatchListener {
 public:
-  PathWatcherListener(
-    Napi::Env env,
-    Napi::ThreadSafeFunction tsfn
-  );
+  PathWatcherListener(Napi::Env env, Napi::ThreadSafeFunction tsfn);
 
-  void handleFileAction(
-    efsw::WatchID watchId,
-    const std::string& dir,
-    const std::string& filename,
-    efsw::Action action,
-    std::string oldFilename
-  ) override;
+  void handleFileAction(efsw::WatchID watchId, const std::string &dir,
+                        const std::string &filename, efsw::Action action,
+                        std::string oldFilename) override;
 
   void AddPath(PathTimestampPair pair, efsw::WatchID handle);
   void RemovePath(efsw::WatchID handle);
@@ -116,7 +113,7 @@ public:
   efsw::WatchID GetHandleForPath(std::string path);
   bool IsEmpty();
   void Stop();
-  void Stop(FileWatcher* fileWatcher);
+  void Stop(FileWatcher *fileWatcher);
 
 private:
   std::atomic<bool> isShuttingDown{false};
@@ -132,22 +129,22 @@ class PathWatcher : public Napi::Addon<PathWatcher> {
 public:
   PathWatcher(Napi::Env env, Napi::Object exports);
   ~PathWatcher();
-
   bool isStopping = false;
 
 private:
-  Napi::Value Watch(const Napi::CallbackInfo& info);
-  Napi::Value Unwatch(const Napi::CallbackInfo& info);
-  void SetCallback(const Napi::CallbackInfo& info);
+  Napi::Value Watch(const Napi::CallbackInfo &info);
+  Napi::Value Unwatch(const Napi::CallbackInfo &info);
+  void SetCallback(const Napi::CallbackInfo &info);
   void Cleanup(Napi::Env env);
   void StopAllListeners();
 
   int envId;
   bool isFinalizing = false;
   bool isWatching = false;
+  int watchGeneration = 0;
   Napi::FunctionReference callback;
   Napi::ThreadSafeFunction tsfn;
-  PathWatcherListener* listener;
+  PathWatcherListener *listener;
 
-  FileWatcher* fileWatcher = nullptr;
+  FileWatcher *fileWatcher = nullptr;
 };

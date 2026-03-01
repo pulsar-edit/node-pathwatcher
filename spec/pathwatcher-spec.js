@@ -22,7 +22,10 @@ describe('PathWatcher', () => {
   describe('getWatchedPaths', () => {
     it('returns an array of all watched paths', () => {
       let realTempFilePath = fs.realpathSync(tempFile);
-      let expectedWatchPath = path.dirname(realTempFilePath);
+      let expectedWatchPath = realTempFilePath;
+      if (process.platform !== 'darwin') {
+        expectedWatchPath = path.dirname(realTempFilePath);
+      }
 
       expect(PathWatcher.getWatchedPaths()).toEqual([]);
 
@@ -47,7 +50,10 @@ describe('PathWatcher', () => {
   describe('closeAllWatchers', () => {
     it('closes all watched paths', () => {
       let realTempFilePath = fs.realpathSync(tempFile);
-      let expectedWatchPath = path.dirname(realTempFilePath);
+      let expectedWatchPath = realTempFilePath;
+      if (process.platform !== 'darwin') {
+        expectedWatchPath = path.dirname(realTempFilePath);
+      }
       expect(PathWatcher.getWatchedPaths()).toEqual([]);
       PathWatcher.watch(tempFile, EMPTY);
       expect(PathWatcher.getWatchedPaths()).toEqual([expectedWatchPath]);

@@ -1,4 +1,5 @@
 #include "../core.h"
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include "FSEventsFileWatcher.hpp"
 
@@ -196,11 +197,23 @@ efsw::WatchID FSEventsFileWatcher::addWatch(
   // The `_useRecursion` flag is ignored; it's present for API compatibility.
   bool _useRecursion
 ) {
+  // FSEvents watches directories, not individual files. If the caller passes a
+  // file path (which the JS layer now does when watching a specific file on
+  // macOS), silently promote it to the parent directory. The stream will then
+  // deliver per-file events for the whole directory, and the existing
+  // event-matching logic — which already keys on the parent directory — will
+  // route events for the right file to the right handle.
+  struct stat st;
+  std::string watchDir = directory;
+  if (stat(directory.c_str(), &st) == 0 && !S_ISDIR(st.st_mode)) {
+    watchDir = PathWithoutFileName(directory, false);
+  }
+
   efsw::WatchID handle = nextHandleID++;
   {
     std::lock_guard<std::mutex> lock(mapMutex);
-    handlesToPaths[handle] = directory;
-    pathsToHandles[directory] = handle;
+    handlesToPaths[handle] = watchDir;
+    pathsToHandles[watchDir] = handle;
     handlesToListeners[handle] = listener;
   }
 
@@ -208,8 +221,26 @@ efsw::WatchID FSEventsFileWatcher::addWatch(
 
   if (!didStart) {
     removeHandle(handle);
-    // TODO: Debug information?
-    return -handle;
+
+    // FSEventStreamStart() doesn't expose a reason for failure. Inspect the
+    // newly-added path post-hoc to return the most specific error code we can.
+    // (All previously-watched paths were already working in the prior stream,
+    // so the new path is the most likely culprit.)
+    if (stat(watchDir.c_str(), &st) != 0) {
+      if (errno == EACCES || errno == EPERM) {
+        return efsw::Errors::FileNotReadable;
+      }
+      return efsw::Errors::FileNotFound;
+    }
+
+    struct statfs sfsb;
+    if (statfs(watchDir.c_str(), &sfsb) == 0) {
+      if (!(sfsb.f_flags & MNT_LOCAL)) {
+        return efsw::Errors::FileRemote;
+      }
+    }
+
+    return efsw::Errors::WatcherFailed;
   }
 
   return handle;
@@ -418,13 +449,24 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
               sendFileAction(handle, dirPath, filePath, efsw::Actions::Moved, newFilepath);
             }
           } else {
-            // This is a move from one directory to another, so we'll treat
-            // it as one deletion and one creation.
-            sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
-            sendFileAction(handle, newDir, newFilepath, efsw::Actions::Add);
-
-            if (nEvent.flags & shorthandFSEventsModified) {
-              sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
+            // This is a move from one directory to another. Use PathExists to
+            // determine which path is the source (moved away from) and which
+            // is the destination (moved to), since FSEvents doesn't guarantee
+            // event ordering for cross-directory renames. This matters for
+            // atomic saves, where a temp file from outside the watched
+            // directory is renamed over the target file inside it.
+            if (!PathExists(event.path)) {
+              // event is the source; the file moved out of our watched dir.
+              sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
+              sendFileAction(handle, newDir, newFilepath, efsw::Actions::Add);
+            } else {
+              // event is the destination; the file was moved into our watched
+              // dir (e.g. an atomic save from a temp directory).
+              sendFileAction(handle, newDir, newFilepath, efsw::Actions::Delete);
+              sendFileAction(handle, dirPath, filePath, efsw::Actions::Add);
+              if (nEvent.flags & shorthandFSEventsModified) {
+                sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
+              }
             }
           }
         } else {
@@ -616,6 +658,10 @@ bool FSEventsFileWatcher::startNewStream() {
   );
 
   FSEventStreamSetDispatchQueue(nextEventStream, queue);
+  // The stream now holds its own retain on the queue; release ours so the
+  // queue is freed when the stream is eventually torn down.
+  dispatch_release(queue);
+
   bool didStart = FSEventStreamStart(nextEventStream);
 
   // Release all the strings we just created.
@@ -633,6 +679,13 @@ bool FSEventsFileWatcher::startNewStream() {
       FSEventStreamRelease(currentEventStream);
     }
     currentEventStream = nextEventStream;
+    nextEventStream = nullptr;
+  } else {
+    // The stream was created but never started. The Stop→Invalidate→Release
+    // sequence is only valid for started streams; for an un-started one, just
+    // unschedule it from the dispatch queue (passing NULL) and release it.
+    FSEventStreamSetDispatchQueue(nextEventStream, NULL);
+    FSEventStreamRelease(nextEventStream);
     nextEventStream = nullptr;
   }
 
