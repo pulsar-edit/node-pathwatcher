@@ -103,15 +103,12 @@ efsw::WatchID KqueueFileWatcher::addWatch(const std::string &path,
                                           efsw::FileWatchListener *listener,
                                           bool /* _useRecursion */
 ) {
-  std::cout << "addWatch: " << path << std::endl;
   if (!isValid) {
-    std::cout << " FAILURE for " << path << std::endl;
     return efsw::Errors::WatcherFailed;
   }
 
   int fd = open(path.c_str(), O_EVTONLY);
   if (fd < 0) {
-    std::cout << " ERROR for " << path << std::endl;
     switch (errno) {
     case ENOENT:
       return efsw::Errors::FileNotFound;
@@ -148,11 +145,9 @@ efsw::WatchID KqueueFileWatcher::addWatch(const std::string &path,
     handlesToPaths.erase(handle);
     handlesToListeners.erase(handle);
     close(fd);
-    std::cout << " WATCH FAILED FOR for " << path << std::endl;
     return efsw::Errors::WatcherFailed;
   }
 
-  std::cout << " WATCH SUCCEEDED for " << path << std::endl;
   return handle;
 }
 
@@ -232,7 +227,6 @@ bool KqueueFileWatcher::reopenFd(efsw::WatchID handle,
 
 void KqueueFileWatcher::eventLoop() {
   while (!stopping) {
-    std::cout << "eventLoop!" << std::endl;
     struct kevent event;
     int r;
     do {
@@ -269,8 +263,6 @@ void KqueueFileWatcher::eventLoop() {
     const std::string &dir = parts.first;
     const std::string &filename = parts.second;
 
-    std::cout << "Processing filename: " << filename << std::endl;
-
     if (event.fflags & NOTE_RENAME) {
       // The inode we were watching has been renamed. F_GETPATH returns its
       // current (new) path. We must call it before closing the fd.
@@ -288,16 +280,13 @@ void KqueueFileWatcher::eventLoop() {
         std::pair<std::string, std::string> newParts = SplitPath(newPath);
         if (parts.first != newParts.first) {
           // Treat moves outside of the directory as deletions.
-          std::cout << "Action: DELETED " << watchedPath << std::endl;
           sendFileAction(handle, dir, filename, efsw::Actions::Delete);
         } else {
-          std::cout << "Action: MOVED " << newPath << std::endl;
           sendFileAction(handle, newParts.first, newParts.second,
                          efsw::Actions::Moved, filename);
         }
       } else {
         // F_GETPATH failed or returned the same path — treat as a deletion.
-        std::cout << "Action: DELETED " << watchedPath << std::endl;
         sendFileAction(handle, dir, filename, efsw::Actions::Delete);
       }
 
@@ -312,19 +301,15 @@ void KqueueFileWatcher::eventLoop() {
       if (stat(watchedPath.c_str(), &st) == 0 &&
           reopenFd(handle, watchedPath)) {
         // A new file appeared at the same path: atomic save.
-        std::cout << "Action: CHANGED " << watchedPath << std::endl;
         sendFileAction(handle, dir, filename, efsw::Actions::Modified);
       } else {
         // The path is genuinely gone.
-        std::cout << "Action: DELETED " << watchedPath << std::endl;
         sendFileAction(handle, dir, filename, efsw::Actions::Delete);
       }
 
     } else if (event.fflags & NOTE_WRITE) {
-      std::cout << "Action: CHANGED " << watchedPath << std::endl;
       sendFileAction(handle, dir, filename, efsw::Actions::Modified);
     } else if (event.fflags & NOTE_ATTRIB) {
-      std::cout << "Action: CHANGED " << watchedPath << std::endl;
       // macOS sometimes skips NOTE_WRITE when a file is truncated to empty,
       // firing NOTE_ATTRIB instead. Detect this by seeking to the end.
       if (lseek(fd, 0, SEEK_END) == 0) {
