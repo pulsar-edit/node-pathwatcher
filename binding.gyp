@@ -121,7 +121,11 @@
       "conditions": [
         ['OS=="mac"', {
           "sources+": [
-            "lib/platform/FSEventsFileWatcher.cpp"
+            "lib/platform/FSEventsFileWatcher.cpp",
+            "lib/platform/KqueueFileWatcher.cpp"
+          ],
+          "defines+": [
+            "USE_KQUEUE"
           ]
         }],
         ['OS=="win"', {

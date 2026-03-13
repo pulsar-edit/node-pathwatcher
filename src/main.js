@@ -180,7 +180,7 @@ let PathWatcherId = 10;
 // about; it’s the `PathWatcher`’s job to filter this stream and ignore the
 // irrelevant events.
 //
-// For instance, a `NativeWatcher` can only watch a directory, but a
+// For instance, a `NativeWatcher` may only watch a directory, but a
 // `PathWatcher` can watch a specific file in the directory. In that case, it’s
 // up to the `PathWatcher` to ignore any events that do not pertain to that
 // file.
@@ -221,16 +221,23 @@ class PathWatcher {
     // dependence on this library and move its consumers to a file-watcher
     // contract with an asynchronous API.
     this.normalizedPath = getRealFilePath(watchedPath);
+    this.isDirectory = false;
+    try {
+      let stat = fs.statSync(this.normalizedPath);
+      this.isDirectory = stat.isDirectory();
+    } catch (err) {
+      this.isDirectory = false;
+    }
     // try {
     //   this.normalizedPath = fs.realpathSync(watchedPath) ?? watchedPath;
     // } catch (err) {
     //   this.normalizedPath = watchedPath;
     // }
 
-    // We must watch a directory. If this is a file, we must watch its parent.
+    // In certain scenarios, we must watch a directory — meaning, if this is a file, we must watch its parent.
     // If this is a directory, we can watch it directly. This flag helps us
     // keep track of it.
-    this.isWatchingParent = !isDirectory(this.normalizedPath);
+    this.isWatchingParent = process.platform !== 'darwin' && !isDirectory(this.normalizedPath);
 
     // `originalNormalizedPath` will always contain the resolved (real path on
     // disk) file path that we care about.
@@ -407,18 +414,31 @@ class PathWatcher {
       return;
     }
 
-
     switch (newEvent.action) {
       case 'rename':
         // This event needs no alteration… as long as it relates to the file
         // we care about.
-        if (!eventPathIsEqual && !eventOldPathIsEqual) return;
+        if (!eventPathIsEqual && !eventOldPathIsEqual) {
+          return;
+        }
         break;
       case 'change':
+        // Must relate to the file we care about.
+        if (!eventPathIsEqual) return;
+        if (!this.isWatchingParent) {
+          newEvent.path = '';
+        }
+        break;
       case 'delete':
+        if (!eventPathIsEqual) return;
+        if (this.isDirectory) {
+          // Do nothing. If you're watching a directory, you don't get notified
+          // when the directory gets deleted. This matches existing behavior.
+          return;
+        }
+        break;
       case 'create':
-        // These events need no alteration… as long as they relate to the file
-        // we care about.
+        // Must relate to the file we care about.
         if (!eventPathIsEqual) return;
         break;
       case 'child-create':
@@ -497,7 +517,10 @@ class PathWatcher {
             this.moveToPath(event.path);
           }
 
-          if (oldWatched && newWatched) {
+          let isSameDirectory = !this.isWatchingParent &&
+            path.dirname(event.path) == path.dirname(event.oldPath);
+
+          if ((oldWatched && newWatched) || isSameDirectory) {
             // We can keep tabs on both file paths from here, so this will
             // be treated as a rename.
             newEvent.action = 'rename';

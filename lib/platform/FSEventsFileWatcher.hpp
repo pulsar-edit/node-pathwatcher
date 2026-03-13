@@ -84,7 +84,7 @@ private:
   size_t removeHandle(efsw::WatchID handle);
   bool startNewStream();
 
-  long nextHandleID;
+  long nextHandleID = 1;
   std::atomic<bool> isProcessing{false};
   std::atomic<bool> pendingDestruction{false};
   std::mutex processingMutex;
