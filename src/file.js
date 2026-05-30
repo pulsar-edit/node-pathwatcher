@@ -496,6 +496,7 @@ class File {
         }
         // Same event name - it's an atomic update
         this.unsubscribeFromNativeChangeEvents();
+        this.subscribeToNativeChangeEvents(); // because the inode changed
       case 'change':
       case 'resurrect':
         this.cachedContents = null;
