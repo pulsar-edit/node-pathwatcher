@@ -520,7 +520,12 @@ class PathWatcher {
           let isSameDirectory = !this.isWatchingParent &&
             path.dirname(event.path) == path.dirname(event.oldPath);
 
-          if ((oldWatched && newWatched) || isSameDirectory) {
+          if (eventPathIsEqual && !eventOldPathIsEqual) {
+            // Atomic save: some other file was renamed into our watched path.
+            // The new path _is_ the watched file, but the old path was not.
+            newEvent.action = 'change';
+            newEvent.path = '';
+          } else if ((oldWatched && newWatched) || isSameDirectory) {
             // We can keep tabs on both file paths from here, so this will
             // be treated as a rename.
             newEvent.action = 'rename';
