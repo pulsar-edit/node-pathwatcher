@@ -494,7 +494,7 @@ class File {
           this.emitter.emit('did-rename');
           return;
         }
-        // Same event name - it's an atomic update
+        // Same file name - it's an atomic update
         this.unsubscribeFromNativeChangeEvents();
         this.subscribeToNativeChangeEvents(); // because the inode changed
       case 'change':
