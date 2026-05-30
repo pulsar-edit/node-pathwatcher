@@ -485,13 +485,17 @@ class File {
         this.detectResurrectionAfterDelay();
         return;
       case 'rename':
-        this.setPath(eventPath);
-        this.subscribeToNativeChangeEvents();
-        if (Grim.includeDeprecatedAPIs) {
-          this.emit('moved');
+        if (eventPath !== this.path) {
+          this.setPath(eventPath);
+          this.subscribeToNativeChangeEvents();
+          if (Grim.includeDeprecatedAPIs) {
+            this.emit('moved');
+          }
+          this.emitter.emit('did-rename');
+          return;
         }
-        this.emitter.emit('did-rename');
-        return;
+        // Same event name - it's an atomic update
+        this.unsubscribeFromNativeChangeEvents();
       case 'change':
       case 'resurrect':
         this.cachedContents = null;
