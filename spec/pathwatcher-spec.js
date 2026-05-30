@@ -19,6 +19,29 @@ describe('PathWatcher', () => {
     await wait(100);
   });
 
+  describe('when a watched file is replaced via atomic save', () => {
+    it('fires the callback with a change event', async () => {
+      let eventType;
+      let eventPath;
+
+      PathWatcher.watch(tempFile, (type, path) => {
+        eventType = type;
+        eventPath = path;
+      });
+
+      await wait(20);
+
+      let tempFileCopy = path.join(tempDir, 'file-copy');
+      fs.writeFileSync(tempFileCopy, 'atomic save content');
+      fs.renameSync(tempFileCopy, tempFile);
+
+      await condition(() => !!eventType);
+
+      expect(eventType).toBe('change');
+      expect(eventPath).toBe('');
+    });
+  });
+
   describe('getWatchedPaths', () => {
     it('returns an array of all watched paths', () => {
       let realTempFilePath = fs.realpathSync(tempFile);
