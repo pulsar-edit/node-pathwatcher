@@ -119,6 +119,11 @@
         "vendor/efsw",
       ],
       "conditions": [
+        ['OS=="linux"', {
+          "sources+": [
+            "lib/platform/InotifyFileWatcher.cpp"
+          ],
+        }],
         ['OS=="mac"', {
           "sources+": [
             "lib/platform/FSEventsFileWatcher.cpp",

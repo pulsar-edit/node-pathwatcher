@@ -17,6 +17,11 @@ typedef FSEventsFileWatcher FileWatcher;
 #endif // USE_KQUEUE
 #endif // __APPLE__
 
+#ifdef __linux__
+#include "./platform/InotifyFileWatcher.hpp"
+typedef InotifyFileWatcher FileWatcher;
+#endif // __linux__
+
 #ifndef _WIN32
 #include <sys/time.h>
 #endif
@@ -27,7 +32,7 @@ typedef FSEventsFileWatcher FileWatcher;
 #define PATH_SEPARATOR '/'
 #endif
 
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__linux__)
 typedef efsw::FileWatcher FileWatcher;
 #endif
 
