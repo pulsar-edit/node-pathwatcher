@@ -61,6 +61,12 @@ class WatcherWin32 : public Watcher {
 
 	WatcherStructWin32* Struct;
 	HANDLE DirHandle;
+	// PULSAR PATCH: the path `DirHandle` resolved to when the watch was
+	// created, as reported by `GetFinalPathNameByHandleW`. Compared against the
+	// handle's current path on each completion so that we can detect when the
+	// watched directory is renamed or moved out from under us. Not part of
+	// upstream efsw; see `WatchCallback`.
+	std::wstring CanonicalPath;
 	std::vector<BYTE> Buffer;
 	LPARAM lParam;
 	DWORD NotifyFilter;
