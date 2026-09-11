@@ -6,7 +6,9 @@
 #include <poll.h>
 #include <string.h>
 #include <sys/inotify.h>
+#include <tuple>
 #include <unistd.h>
+#include <vector>
 
 #ifdef DEBUG
 #include <iostream>
@@ -49,9 +51,11 @@ InotifyFileWatcher::~InotifyFileWatcher() {
   isValid = false;
   stopping = true;
 
-  // Unblock the event loop thread.
+  // Unblock the event loop thread. Nothing useful to do if this fails, but
+  // `write` is declared `warn_unused_result`, so discard the result
+  // explicitly rather than let it warn.
   char byte = 0;
-  write(wakeupPipe[1], &byte, 1);
+  (void)write(wakeupPipe[1], &byte, 1);
 
   if (eventThread.joinable())
     eventThread.join();
@@ -76,6 +80,14 @@ efsw::WatchID InotifyFileWatcher::addWatch(const std::string &path,
   if (dir.empty() || dir.back() != '/')
     dir += '/';
 
+  // We hold `mapMutex` across the `inotify_add_watch()` call below, just as
+  // `removeWatch()` does for its removal. The kernel can start queueing events
+  // for this watch the moment it exists, and the event loop needs the same
+  // lock to find the listeners for a wd — so taking it first means the event
+  // loop waits for us to finish registering rather than reading events for a
+  // wd we haven't recorded yet and dropping them on the floor.
+  std::lock_guard<std::mutex> lock(mapMutex);
+
   int wd = inotify_add_watch(inotifyFd, dir.c_str(), kWatchMask);
   if (wd < 0) {
     switch (errno) {
@@ -88,7 +100,6 @@ efsw::WatchID InotifyFileWatcher::addWatch(const std::string &path,
     }
   }
 
-  std::lock_guard<std::mutex> lock(mapMutex);
   efsw::WatchID handle = nextHandleID++;
   handlesToWatches[handle] = {dir, listener, wd};
   wdToHandles.insert({wd, handle});
@@ -96,40 +107,74 @@ efsw::WatchID InotifyFileWatcher::addWatch(const std::string &path,
 }
 
 void InotifyFileWatcher::removeWatch(efsw::WatchID handle) {
-  int wd = -1;
-  bool wasLastHandleForWd = false;
-  {
-    std::lock_guard<std::mutex> lock(mapMutex);
-    auto it = handlesToWatches.find(handle);
-    if (it == handlesToWatches.end())
-      return;
-    wd = it->second.wd;
-    handlesToWatches.erase(it);
+  // We hold `mapMutex` across the `inotify_rm_watch()` call below. That's
+  // load-bearing: it ensures we've recorded that we're expecting an
+  // IN_IGNORED before the event loop — which takes the same lock in
+  // `forgetWatch()` — can possibly read it.
+  std::lock_guard<std::mutex> lock(mapMutex);
+  auto it = handlesToWatches.find(handle);
+  if (it == handlesToWatches.end())
+    return;
+  int wd = it->second.wd;
+  handlesToWatches.erase(it);
 
-    auto range = wdToHandles.equal_range(wd);
-    for (auto wit = range.first; wit != range.second; ++wit) {
-      if (wit->second == handle) {
-        wdToHandles.erase(wit);
-        break;
-      }
+  auto range = wdToHandles.equal_range(wd);
+  for (auto wit = range.first; wit != range.second; ++wit) {
+    if (wit->second == handle) {
+      wdToHandles.erase(wit);
+      break;
     }
-    wasLastHandleForWd = (wdToHandles.find(wd) == wdToHandles.end());
   }
 
-  if (wasLastHandleForWd) {
-    // EINVAL here just means the kernel already removed this watch (e.g. the
-    // directory was deleted); safe to ignore.
-    inotify_rm_watch(inotifyFd, wd);
-  }
+  // Other handles still care about this wd, so leave the kernel watch alone.
+  if (wdToHandles.find(wd) != wdToHandles.end())
+    return;
+
+  // Removing the watch makes the kernel queue an IN_IGNORED for this wd. Note
+  // that we're expecting it, so the event loop doesn't mistake it for a
+  // kernel-initiated removal of whatever watch holds this number by the time
+  // we get around to reading it. EINVAL means the kernel already dropped the
+  // watch on its own (e.g. the directory was deleted), in which case nothing
+  // new is coming from us and there's nothing to account for.
+  if (inotify_rm_watch(inotifyFd, wd) == 0)
+    pendingIgnored[wd]++;
 }
 
 void InotifyFileWatcher::forgetWatch(int wd) {
   std::lock_guard<std::mutex> lock(mapMutex);
+
+  auto pending = pendingIgnored.find(wd);
+  if (pending != pendingIgnored.end()) {
+    // This IN_IGNORED is the echo of our own `inotify_rm_watch()`;
+    // `removeWatch()` already dropped the bookkeeping. Anything registered
+    // under this wd now is a newer watch that reuses the number, so we leave
+    // it alone.
+    if (--pending->second <= 0)
+      pendingIgnored.erase(pending);
+    return;
+  }
+
   auto range = wdToHandles.equal_range(wd);
   for (auto it = range.first; it != range.second;) {
     handlesToWatches.erase(it->second);
     it = wdToHandles.erase(it);
   }
+}
+
+void InotifyFileWatcher::stopWatch(int wd) {
+  std::lock_guard<std::mutex> lock(mapMutex);
+
+  auto range = wdToHandles.equal_range(wd);
+  for (auto it = range.first; it != range.second;) {
+    handlesToWatches.erase(it->second);
+    it = wdToHandles.erase(it);
+  }
+
+  // Same accounting as `removeWatch()`: the kernel queues an IN_IGNORED for
+  // every watch we remove, and `forgetWatch()` needs to know we asked for it.
+  // A failure here means the watch was already gone, so nothing is coming.
+  if (inotify_rm_watch(inotifyFd, wd) == 0)
+    pendingIgnored[wd]++;
 }
 
 void InotifyFileWatcher::sendFileAction(int wd, const std::string &filename,
@@ -154,7 +199,9 @@ void InotifyFileWatcher::sendFileAction(int wd, const std::string &filename,
 }
 
 void InotifyFileWatcher::eventLoop() {
-  char buf[kEventBufLen];
+  // `alignas` because we cast into this buffer to read `inotify_event`s out of
+  // it, and that type has stricter alignment than `char`.
+  alignas(struct inotify_event) char buf[kEventBufLen];
 
   // State for pairing IN_MOVED_FROM with a following IN_MOVED_TO that shares
   // its cookie and watch — i.e. a rename within the same directory.
@@ -185,11 +232,24 @@ void InotifyFileWatcher::eventLoop() {
     if (r < 0) {
       if (errno == EINTR)
         continue;
+      // Any other poll() failure is not something we can recover from.
+      isValid = false;
       break;
     }
 
     if (stopping || (fds[1].revents & POLLIN))
       break;
+
+    // An error on either descriptor is fatal, and we must not `continue` past
+    // it: poll() reports the condition immediately and forever, ignoring our
+    // timeout, so looping would spin at 100% CPU without ever reading
+    // anything. Better to stop the thread and mark ourselves invalid, which
+    // makes subsequent `addWatch()` calls fail loudly instead of silently
+    // never delivering events.
+    if ((fds[0].revents | fds[1].revents) & (POLLERR | POLLHUP | POLLNVAL)) {
+      isValid = false;
+      break;
+    }
 
     if (r == 0) {
       flushPendingMove();
@@ -208,8 +268,19 @@ void InotifyFileWatcher::eventLoop() {
       auto *event = reinterpret_cast<struct inotify_event *>(&buf[i]);
       i += sizeof(struct inotify_event) + event->len;
 
-      if (event->mask & IN_Q_OVERFLOW)
+      if (event->mask & IN_Q_OVERFLOW) {
+        // The kernel's event queue filled up and it dropped events to make
+        // room. There's nothing we can do to recover them, and no way to know
+        // what we missed, so every watch is potentially out of sync from here
+        // on. Worth logging, since it's otherwise invisible and would look
+        // like the watcher simply stopped noticing some edits.
+#ifdef DEBUG
+        std::cout << "InotifyFileWatcher: event queue overflowed; some events "
+                     "were dropped by the kernel"
+                  << std::endl;
+#endif
         continue;
+      }
 
       std::string filename = event->len > 0 ? std::string(event->name) : "";
 
@@ -227,8 +298,9 @@ void InotifyFileWatcher::eventLoop() {
       }
 
       if (event->mask & IN_IGNORED) {
-        // The kernel already removed this watch (explicit removeWatch,
-        // directory deleted, or filesystem unmounted).
+        // The watch is gone: either we removed it ourselves, or the kernel
+        // dropped it (directory deleted, filesystem unmounted).
+        // `forgetWatch` tells those two cases apart.
         forgetWatch(event->wd);
         continue;
       }
@@ -245,7 +317,20 @@ void InotifyFileWatcher::eventLoop() {
         // The watched directory itself is gone or has moved. Report it as a
         // deletion of the directory; the caller can re-addWatch if it cares
         // to keep following it (we have no way to learn its new path).
+        //
+        // This must happen before any teardown below, since `sendFileAction`
+        // finds its listeners by looking up `wd` in our bookkeeping.
         sendFileAction(event->wd, "", efsw::Actions::Delete);
+
+        if (event->mask & IN_MOVE_SELF) {
+          // Unlike a deletion, a move leaves the watch alive — the directory
+          // still exists, just somewhere else — and the kernel sends no
+          // IN_IGNORED. Left alone, it would keep reporting events for the
+          // directory's children under the stale path we recorded in
+          // `Watch::dir`. We've just told the caller the directory is gone,
+          // so make that true and shut the watch down.
+          stopWatch(event->wd);
+        }
         continue;
       }
 

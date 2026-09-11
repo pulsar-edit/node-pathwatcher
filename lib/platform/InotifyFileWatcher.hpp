@@ -44,7 +44,10 @@ public:
 
   void removeWatch(efsw::WatchID handle);
 
-  bool isValid = true;
+  // Atomic because the event loop thread clears it when it hits an
+  // unrecoverable poll() error, while `addWatch()` reads it on the main
+  // thread.
+  std::atomic<bool> isValid{true};
 
 private:
   struct Watch {
@@ -60,10 +63,18 @@ private:
   void sendFileAction(int wd, const std::string &filename, efsw::Action action,
                       const std::string &oldFilename = "");
 
-  // Drops all bookkeeping for `wd` without calling `inotify_rm_watch()`; used
-  // when the kernel tells us (via IN_IGNORED) that it already dropped the
-  // watch on its own (e.g. the directory was deleted or unmounted).
+  // Responds to an IN_IGNORED for `wd`. If we provoked it ourselves by
+  // calling `inotify_rm_watch()`, it's already accounted for and we do
+  // nothing. Otherwise the kernel dropped the watch on its own (e.g. the
+  // directory was deleted or unmounted), so we drop all bookkeeping for `wd`.
   void forgetWatch(int wd);
+
+  // Tears down a watch that the kernel is still holding open, dropping all
+  // bookkeeping for `wd` and telling the kernel to stop watching. Used when
+  // the watched directory moves (IN_MOVE_SELF): the watch survives the move,
+  // but it would report every subsequent event under the directory's old,
+  // now-wrong path, so we shut it down instead.
+  void stopWatch(int wd);
 
   long nextHandleID = 1;
   int inotifyFd = -1;
@@ -74,4 +85,9 @@ private:
 
   std::unordered_map<efsw::WatchID, Watch> handlesToWatches;
   std::unordered_multimap<int, efsw::WatchID> wdToHandles;
+
+  // wd -> number of IN_IGNORED events we've asked the kernel for (via
+  // `inotify_rm_watch()`) but haven't read yet. Lets the event loop tell our
+  // own removals apart from kernel-initiated ones.
+  std::unordered_map<int, int> pendingIgnored;
 };
