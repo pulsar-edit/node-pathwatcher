@@ -51,6 +51,34 @@ static void initReadDirectoryChangesEx() {
 	}
 }
 
+/// PULSAR PATCH: Returns the path that `handle` currently resolves to, or an
+/// empty string if it can't be determined — which includes the case where the
+/// directory has been deleted. Not part of upstream efsw.
+static std::wstring GetHandlePath( HANDLE handle ) {
+	if ( NULL == handle || INVALID_HANDLE_VALUE == handle )
+		return std::wstring();
+
+	// Called with a NULL buffer, this returns the length required *including*
+	// the null terminator; called with a buffer, it returns the number of
+	// characters written *excluding* it.
+	DWORD len =
+		GetFinalPathNameByHandleW( handle, NULL, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS );
+
+	if ( 0 == len )
+		return std::wstring();
+
+	std::wstring path( len, L'\0' );
+
+	DWORD written = GetFinalPathNameByHandleW( handle, &path[0], len,
+											   FILE_NAME_NORMALIZED | VOLUME_NAME_DOS );
+
+	if ( 0 == written || written >= len )
+		return std::wstring();
+
+	path.resize( written );
+	return path;
+}
+
 void WatchCallbackOld( WatcherWin32* pWatch ) {
 	PFILE_NOTIFY_INFORMATION pNotify;
 	size_t offset = 0;
@@ -160,6 +188,19 @@ void CALLBACK WatchCallback( DWORD dwNumberOfBytesTransfered, LPOVERLAPPED lpOve
 	WatcherStructWin32* tWatch = (WatcherStructWin32*)lpOverlapped;
 	WatcherWin32* pWatch = tWatch->Watch;
 
+	// PULSAR PATCH: The directory handle stays valid when the directory is
+	// renamed or moved, so the watch keeps reporting changes to its children —
+	// but every path we report is rebuilt from the directory path we were given
+	// at watch time. Once the handle resolves somewhere else, every path we'd
+	// emit names a file that isn't there. Stop the watch instead: returning
+	// without reaching `RefreshWatch` below leaves it un-rearmed, so it goes
+	// quiet for good. The handle is released later, when the watch is removed.
+	if ( NULL != pWatch && !pWatch->CanonicalPath.empty() &&
+		 pWatch->CanonicalPath != GetHandlePath( pWatch->DirHandle ) ) {
+		pWatch->StopNow = true;
+		return;
+	}
+
 	if ( dwNumberOfBytesTransfered == 0 ) {
 		if ( nullptr != pWatch && !pWatch->StopNow ) {
 			RefreshWatch( tWatch );
@@ -246,6 +287,9 @@ WatcherStructWin32* CreateWatch( LPCWSTR szDirectory, bool recursive,
 		 CreateIoCompletionPort( pWatch->DirHandle, iocp, 0, 1 ) ) {
 		pWatch->NotifyFilter = notifyFilter;
 		pWatch->Recursive = recursive;
+		// PULSAR PATCH: remember where this handle points now, so `WatchCallback`
+		// can notice later if the directory has been moved out from under it.
+		pWatch->CanonicalPath = GetHandlePath( pWatch->DirHandle );
 
 		if ( RefreshResult::Failed != RefreshWatch( tWatch ) ) {
 			return tWatch;
