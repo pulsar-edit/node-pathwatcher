@@ -40,6 +40,38 @@ describe('PathWatcher', () => {
       expect(eventType).toBe('change');
       expect(eventPath).toBe('');
     });
+
+    it('keeps watching the file that replaced the original', async () => {
+      // An atomic save doesn't modify the watched file; it replaces it with a
+      // different one. Platforms that watch the file itself (rather than its
+      // parent directory) therefore have to notice this and re-attach to
+      // whatever now lives at that path — otherwise the save gets reported and
+      // nothing ever is again.
+      let spy = jasmine.createSpy('spy');
+      PathWatcher.watch(tempFile, spy);
+
+      await wait(20);
+
+      let tempFileCopy = path.join(tempDir, 'file-copy');
+      fs.writeFileSync(tempFileCopy, 'atomic save content');
+      fs.renameSync(tempFileCopy, tempFile);
+
+      await condition(() => spy.calls.count() > 0);
+      expect(spy).toHaveBeenCalledWith('change', '');
+
+      // Let any further events from the save itself land before we reset, so
+      // that a straggler can't be mistaken for the event we're about to
+      // provoke.
+      await wait(200);
+      spy.calls.reset();
+
+      // The real test: an ordinary write to the file that now occupies the
+      // watched path must still be reported.
+      fs.writeFileSync(tempFile, 'subsequent change');
+
+      await condition(() => spy.calls.count() > 0);
+      expect(spy).toHaveBeenCalledWith('change', '');
+    });
   });
 
   describe('getWatchedPaths', () => {
