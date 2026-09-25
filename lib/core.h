@@ -22,6 +22,11 @@ typedef FSEventsFileWatcher FileWatcher;
 typedef InotifyFileWatcher FileWatcher;
 #endif // __linux__
 
+#ifdef _WIN32
+#include "./platform/ReadDirectoryChangesFileWatcher.hpp"
+typedef ReadDirectoryChangesFileWatcher FileWatcher;
+#endif // _WIN32
+
 #ifndef _WIN32
 #include <sys/time.h>
 #endif
@@ -30,10 +35,6 @@ typedef InotifyFileWatcher FileWatcher;
 #define PATH_SEPARATOR '\\'
 #else
 #define PATH_SEPARATOR '/'
-#endif
-
-#if !defined(__APPLE__) && !defined(__linux__)
-typedef efsw::FileWatcher FileWatcher;
 #endif
 
 typedef efsw::WatchID WatcherHandle;

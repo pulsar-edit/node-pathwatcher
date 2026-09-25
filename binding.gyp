@@ -134,6 +134,9 @@
           ]
         }],
         ['OS=="win"', {
+          "sources+": [
+            "lib/platform/ReadDirectoryChangesFileWatcher.cpp"
+          ],
           'msvs_settings': {
             'VCCLCompilerTool': {
               'ExceptionHandling': 1,  # /EHsc

@@ -431,13 +431,7 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo &info) {
 
     listener = new PathWatcherListener(env, tsfn);
 
-#if defined(__APPLE__) || defined(__linux__)
     fileWatcher = new FileWatcher();
-#else
-    fileWatcher = new efsw::FileWatcher();
-    fileWatcher->followSymlinks(true);
-    fileWatcher->watch();
-#endif
 
     isWatching = true;
   }
