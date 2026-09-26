@@ -2,7 +2,7 @@
   "main": "./src/main",
   "name": "@pulsar-edit/pathwatcher",
   "description": "Watch files and directories for changes",
-  "version": "9.1.0",
+  "version": "9.1.1",
   "licenses": [
     {
       "type": "MIT",
