@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../vendor/efsw/include/efsw/efsw.hpp"
+#include "../watcher.h"
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -9,11 +9,11 @@
 #include <unordered_set>
 #include <vector>
 
-// An API-compatible replacement for `efsw::FileWatcher` that talks to
-// `ReadDirectoryChangesW` directly. Plays the same role on Windows that
-// `InotifyFileWatcher` plays on Linux.
+// A watcher that talks to `ReadDirectoryChangesW` directly. Plays the same
+// role on Windows that `InotifyFileWatcher` plays on Linux. See `watcher.h` for
+// the interface.
 //
-// Key differences from `FileWatcherWin32`:
+// Key differences from efsw’s `FileWatcherWin32`, which this replaced:
 //
 // * Ownership of in-flight I/O. Every live watch has a
 //   `ReadDirectoryChangesW` outstanding, and the kernel writes into that
@@ -43,11 +43,11 @@ public:
   ReadDirectoryChangesFileWatcher();
   ~ReadDirectoryChangesFileWatcher();
 
-  efsw::WatchID addWatch(const std::string &path,
-                         efsw::FileWatchListener *listener,
+  pathwatcher::WatchID addWatch(const std::string &path,
+                         pathwatcher::FileWatchListener *listener,
                          bool _useRecursion = false);
 
-  void removeWatch(efsw::WatchID handle);
+  void removeWatch(pathwatcher::WatchID handle);
 
   // Atomic because the completion thread clears it if the completion port
   // fails, while `addWatch()` reads it on the main thread.
@@ -95,7 +95,7 @@ private:
   std::mutex mapMutex;
   std::thread completionThread;
 
-  std::unordered_map<efsw::WatchID, Watch *> handlesToWatches;
+  std::unordered_map<pathwatcher::WatchID, Watch *> handlesToWatches;
 
   // Watches that have been removed but still have an operation in flight.
   // The completion thread deletes each one when its final packet arrives.

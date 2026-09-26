@@ -7,7 +7,7 @@
 #include <mutex>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreServices/CoreServices.h>
-#include "../../vendor/efsw/include/efsw/efsw.hpp"
+#include "../watcher.h"
 
 class FSEvent {
 public:
@@ -28,21 +28,21 @@ class FSEventsFileWatcher {
 public:
   FSEventsFileWatcher() {};
   ~FSEventsFileWatcher();
-  efsw::WatchID addWatch(
+  pathwatcher::WatchID addWatch(
     const std::string& directory,
-    efsw::FileWatchListener* watcher,
+    pathwatcher::FileWatchListener* watcher,
     bool _useRecursion = false
   );
   void removeWatch(
-    efsw::WatchID watchID
+    pathwatcher::WatchID watchID
   );
 
   void handleActions(std::vector<FSEvent>& events);
   void sendFileAction(
-    efsw::WatchID watchid,
+    pathwatcher::WatchID watchid,
     const std::string& dir,
     const std::string& filename,
-    efsw::Action action,
+    pathwatcher::Action action,
     std::string oldFilename = ""
   );
 
@@ -56,7 +56,7 @@ public:
   );
 
   void handleAddModDel(
-    efsw::WatchID handle,
+    pathwatcher::WatchID handle,
     const uint32_t& flags,
     const std::string& path,
     std::string& dirPath,
@@ -81,7 +81,7 @@ private:
     }
   };
 
-  size_t removeHandle(efsw::WatchID handle);
+  size_t removeHandle(pathwatcher::WatchID handle);
   bool startNewStream();
 
   long nextHandleID = 1;
@@ -99,7 +99,7 @@ private:
 
   std::set<std::string> dirsChanged;
 
-  std::unordered_map<efsw::WatchID, std::string> handlesToPaths;
-  std::unordered_map<std::string, efsw::WatchID> pathsToHandles;
-  std::unordered_map<efsw::WatchID, efsw::FileWatchListener*> handlesToListeners;
+  std::unordered_map<pathwatcher::WatchID, std::string> handlesToPaths;
+  std::unordered_map<std::string, pathwatcher::WatchID> pathsToHandles;
+  std::unordered_map<pathwatcher::WatchID, pathwatcher::FileWatchListener*> handlesToListeners;
 };

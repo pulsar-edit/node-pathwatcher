@@ -1,5 +1,4 @@
 #include "core.h"
-#include "include/efsw/efsw.hpp"
 #include "napi.h"
 #include <string>
 #include <uv.h>
@@ -38,30 +37,30 @@ static bool PredatesWatchStart(struct timespec fileSpec, timeval startTime) {
 }
 #endif
 
-static Napi::BigInt WatcherHandleToBigInt(Napi::Env env, efsw::WatchID handle) {
+static Napi::BigInt WatcherHandleToBigInt(Napi::Env env, pathwatcher::WatchID handle) {
   int64_t handleAsInt64 = static_cast<int64_t>(handle);
   return Napi::BigInt::New(env, handleAsInt64);
 }
 
-static efsw::WatchID BigIntToWatcherHandle(Napi::BigInt value) {
+static pathwatcher::WatchID BigIntToWatcherHandle(Napi::BigInt value) {
   // JavaScript `BigInt`s can be arbitrarily large, so they may not fit inside
   // a `long` or `int64_t`. But if this value needs truncation, something shady
   // is going on, since that value certainly didn't come from us. We conform to
   // the API here, but we don't need to check whether the value was truncated.
   bool lossless = false;
-  efsw::WatchID handle = value.Int64Value(&lossless);
+  pathwatcher::WatchID handle = value.Int64Value(&lossless);
   return handle;
 }
 
-static std::string EventType(efsw::Action action, bool isChild) {
+static std::string EventType(pathwatcher::Action action, bool isChild) {
   switch (action) {
-  case efsw::Actions::Add:
+  case pathwatcher::Actions::Add:
     return isChild ? "child-create" : "create";
-  case efsw::Actions::Delete:
+  case pathwatcher::Actions::Delete:
     return isChild ? "child-delete" : "delete";
-  case efsw::Actions::Modified:
+  case pathwatcher::Actions::Modified:
     return isChild ? "child-change" : "change";
-  case efsw::Actions::Moved:
+  case pathwatcher::Actions::Moved:
     return isChild ? "child-rename" : "rename";
   default:
     return "unknown";
@@ -101,7 +100,7 @@ static void ProcessEvent(Napi::Env env, Napi::Function callback,
   //
   // NOTE: This library previously envisioned that some platforms would allow
   // watching of files directly and some would require watching of a file's
-  // parent folder. EFSW uses the parent-folder approach on all platforms, so
+  // parent folder. We use the parent-folder approach on all platforms, so
   // in practice we're not using half of the event names we used to use. That's
   // why the second argument below is `true`.
   //
@@ -170,14 +169,14 @@ void PathWatcherListener::Stop(FileWatcher *fileWatcher) {
 
 // Correlate a watch ID to a path/timestamp pair.
 void PathWatcherListener::AddPath(PathTimestampPair pair,
-                                  efsw::WatchID handle) {
+                                  pathwatcher::WatchID handle) {
   std::lock_guard<std::mutex> lock(pathsMutex);
   paths[handle] = pair;
   pathsToHandles[pair.path] = handle;
 }
 
 // Remove metadata for a given watch ID.
-void PathWatcherListener::RemovePath(efsw::WatchID handle) {
+void PathWatcherListener::RemovePath(pathwatcher::WatchID handle) {
   std::string path;
   if (isShuttingDown)
     return;
@@ -210,7 +209,7 @@ bool PathWatcherListener::HasPath(std::string path) {
   return it != pathsToHandles.end();
 }
 
-efsw::WatchID PathWatcherListener::GetHandleForPath(std::string path) {
+pathwatcher::WatchID PathWatcherListener::GetHandleForPath(std::string path) {
   std::lock_guard<std::mutex> lock(pathsToHandlesMutex);
   auto it = pathsToHandles.find(path);
   return it->second;
@@ -221,10 +220,10 @@ bool PathWatcherListener::IsEmpty() {
   return paths.empty();
 }
 
-void PathWatcherListener::handleFileAction(efsw::WatchID watchId,
+void PathWatcherListener::handleFileAction(pathwatcher::WatchID watchId,
                                            const std::string &dir,
                                            const std::string &filename,
-                                           efsw::Action action,
+                                           pathwatcher::Action action,
                                            std::string oldFilename) {
 #ifdef DEBUG
   std::cout << "PathWatcherListener::handleFileAction dir: " << dir
@@ -277,14 +276,14 @@ void PathWatcherListener::handleFileAction(efsw::WatchID watchId,
   {
     struct stat file;
     if (stat(newPathStr.c_str(), &file) != 0 &&
-        action != efsw::Action::Delete) {
+        action != pathwatcher::Action::Delete) {
       // If this was a delete action, the file is _expected_ not to exist
       // anymore. Otherwise it's a strange outcome and it means we should
       // ignore this event.
       return;
     }
 
-    if (action == efsw::Action::Add) {
+    if (action == pathwatcher::Action::Add) {
       // One easy way to check if a file was truly just created: does its
       // creation time match its modification time? If not, the file has been
       // written to since its creation.
@@ -302,7 +301,7 @@ void PathWatcherListener::handleFileAction(efsw::WatchID watchId,
 #endif
         return;
       }
-    } else if (action == efsw::Action::Modified) {
+    } else if (action == pathwatcher::Action::Modified) {
       if (PredatesWatchStart(file.st_mtimespec, startTime)) {
 #ifdef DEBUG
         std::cout << "File was modified before we started this path watcher! "
@@ -392,8 +391,8 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo &info) {
   }
 
   // The wrapper JS will resolve this to the file's real path. We expect to be
-  // dealing with real locations on disk, since that's what EFSW will report to
-  // us anyway.
+  // dealing with real locations on disk, since that's what the watcher will
+  // report to us anyway.
   Napi::String path = info[0].ToString();
   std::string cppPath(path);
 
@@ -416,7 +415,7 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo &info) {
 #endif
     int myGeneration = ++watchGeneration;
     tsfn = Napi::ThreadSafeFunction::New(
-        env, callback.Value(), "pathwatcher-efsw-listener", 0, 1,
+        env, callback.Value(), "pathwatcher-listener", 0, 1,
         [this, myGeneration](Napi::Env env) {
           // This is unexpected. We should try to do some cleanup before the
           // environment terminates.
@@ -436,8 +435,8 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo &info) {
     isWatching = true;
   }
 
-  // EFSW represents watchers as unsigned `int`s; we can easily convert these
-  // to JavaScript.
+  // The watcher represents watches as integers; we can easily convert these to
+  // JavaScript.
   WatcherHandle handle =
       fileWatcher->addWatch(cppPath, listener, useRecursiveWatcher);
 
@@ -461,8 +460,8 @@ Napi::Value PathWatcher::Watch(const Napi::CallbackInfo &info) {
   // `setInterval` would; this is the handle that the wrapper JavaScript can
   // use to unwatch the path later.
   //
-  // But EFSW defines a WatchID as a `long`, which means it's 64-bits and
-  // therefore possibly larger than the JS `Number` type can handle. We'll use
+  // But a `WatchID` is a `long`, which can be 64 bits and therefore possibly
+  // larger than the JS `Number` type can handle. We'll use
   // `BigInt`s instead because we live in the future.
   return WatcherHandleToBigInt(env, handle);
 }
@@ -487,10 +486,10 @@ Napi::Value PathWatcher::Unwatch(const Napi::CallbackInfo &info) {
   if (!listener)
     return env.Undefined();
 
-  efsw::WatchID handle = BigIntToWatcherHandle(info[0].As<Napi::BigInt>());
+  pathwatcher::WatchID handle = BigIntToWatcherHandle(info[0].As<Napi::BigInt>());
 
-  // EFSW doesn’t mind if we give it a handle that it doesn’t recognize; it’ll
-  // just silently do nothing.
+  // The watcher doesn’t mind if we give it a handle that it doesn’t recognize;
+  // it’ll just silently do nothing.
   //
   // This is useful because removing watcher can innocuously error anyway on
   // certain platforms. For instance, Linux will automatically stop watching a

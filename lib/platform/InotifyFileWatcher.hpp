@@ -1,17 +1,17 @@
 #pragma once
 
-#include "../../vendor/efsw/include/efsw/efsw.hpp"
+#include "../watcher.h"
 #include <atomic>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
 
-// An API-compatible replacement for `efsw::FileWatcher` that talks to inotify
-// directly. Plays the same role on Linux that `KqueueFileWatcher` and
-// `FSEventsFileWatcher` play on macOS.
+// A watcher that talks to inotify directly. Plays the same role on Linux that
+// `KqueueFileWatcher` and `FSEventsFileWatcher` play on macOS. See `watcher.h`
+// for the interface.
 //
-// Key differences from `FileWatcherInotify`:
+// Key differences from efsw’s `FileWatcherInotify`, which this replaced:
 //
 // * A single `inotify` instance backs every watch; `addWatch()` just calls
 //   `inotify_add_watch()` against it and gets back a watch descriptor (wd). No
@@ -38,11 +38,11 @@ public:
   InotifyFileWatcher();
   ~InotifyFileWatcher();
 
-  efsw::WatchID addWatch(const std::string &path,
-                         efsw::FileWatchListener *listener,
+  pathwatcher::WatchID addWatch(const std::string &path,
+                         pathwatcher::FileWatchListener *listener,
                          bool _useRecursion = false);
 
-  void removeWatch(efsw::WatchID handle);
+  void removeWatch(pathwatcher::WatchID handle);
 
   // Atomic because the event loop thread clears it when it hits an
   // unrecoverable poll() error, while `addWatch()` reads it on the main
@@ -52,7 +52,7 @@ public:
 private:
   struct Watch {
     std::string dir; // always ends with '/'
-    efsw::FileWatchListener *listener;
+    pathwatcher::FileWatchListener *listener;
     int wd;
   };
 
@@ -60,7 +60,7 @@ private:
 
   // Looks up every handle registered for `wd` and dispatches `action` to each
   // of their listeners.
-  void sendFileAction(int wd, const std::string &filename, efsw::Action action,
+  void sendFileAction(int wd, const std::string &filename, pathwatcher::Action action,
                       const std::string &oldFilename = "");
 
   // Responds to an IN_IGNORED for `wd`. If we provoked it ourselves by
@@ -83,8 +83,8 @@ private:
   std::mutex mapMutex;
   std::thread eventThread;
 
-  std::unordered_map<efsw::WatchID, Watch> handlesToWatches;
-  std::unordered_multimap<int, efsw::WatchID> wdToHandles;
+  std::unordered_map<pathwatcher::WatchID, Watch> handlesToWatches;
+  std::unordered_multimap<int, pathwatcher::WatchID> wdToHandles;
 
   // wd -> number of IN_IGNORED events we've asked the kernel for (via
   // `inotify_rm_watch()`) but haven't read yet. Lets the event loop tell our

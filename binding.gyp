@@ -1,105 +1,10 @@
 {
   "targets": [
     {
-      "target_name": "efsw",
-      "type": "static_library",
-      "sources": [
-        "./vendor/efsw/src/efsw/Debug.cpp",
-        "./vendor/efsw/src/efsw/DirWatcherGeneric.cpp",
-        "./vendor/efsw/src/efsw/DirectorySnapshot.cpp",
-        "./vendor/efsw/src/efsw/DirectorySnapshotDiff.cpp",
-        "./vendor/efsw/src/efsw/FileInfo.cpp",
-        "./vendor/efsw/src/efsw/FileSystem.cpp",
-        "./vendor/efsw/src/efsw/FileWatcher.cpp",
-        "./vendor/efsw/src/efsw/FileWatcherCWrapper.cpp",
-        "./vendor/efsw/src/efsw/FileWatcherFSEvents.cpp",
-        "./vendor/efsw/src/efsw/FileWatcherGeneric.cpp",
-        "./vendor/efsw/src/efsw/FileWatcherImpl.cpp",
-        "./vendor/efsw/src/efsw/FileWatcherInotify.cpp",
-        "./vendor/efsw/src/efsw/FileWatcherKqueue.cpp",
-        "./vendor/efsw/src/efsw/FileWatcherWin32.cpp",
-        "./vendor/efsw/src/efsw/Log.cpp",
-        "./vendor/efsw/src/efsw/Mutex.cpp",
-        "./vendor/efsw/src/efsw/String.cpp",
-        "./vendor/efsw/src/efsw/System.cpp",
-        "./vendor/efsw/src/efsw/Thread.cpp",
-        "./vendor/efsw/src/efsw/Watcher.cpp",
-        "./vendor/efsw/src/efsw/WatcherFSEvents.cpp",
-        "./vendor/efsw/src/efsw/WatcherGeneric.cpp",
-        "./vendor/efsw/src/efsw/WatcherInotify.cpp",
-        "./vendor/efsw/src/efsw/WatcherKqueue.cpp",
-        "./vendor/efsw/src/efsw/WatcherWin32.cpp"
-      ],
-      "include_dirs": [
-        "./vendor/efsw/include",
-        "./vendor/efsw/src"
-      ],
-      "conditions": [
-        ["OS==\"win\"", {
-          "sources!": [
-            "./vendor/efsw/src/efsw/WatcherKqueue.cpp",
-            "./vendor/efsw/src/efsw/WatcherFSEvents.cpp",
-            "./vendor/efsw/src/efsw/WatcherInotify.cpp",
-            "./vendor/efsw/src/efsw/FileWatcherKqueue.cpp",
-            "./vendor/efsw/src/efsw/FileWatcherInotify.cpp",
-            "./vendor/efsw/src/efsw/FileWatcherFSEvents.cpp"
-          ],
-          "sources": [
-            "./vendor/efsw/src/efsw/platform/win/FileSystemImpl.cpp",
-            "./vendor/efsw/src/efsw/platform/win/MutexImpl.cpp",
-            "./vendor/efsw/src/efsw/platform/win/SystemImpl.cpp",
-            "./vendor/efsw/src/efsw/platform/win/ThreadImpl.cpp"
-          ],
-        }],
-        ["OS!=\"win\"", {
-          "sources": [
-            "./vendor/efsw/src/efsw/platform/posix/FileSystemImpl.cpp",
-            "./vendor/efsw/src/efsw/platform/posix/MutexImpl.cpp",
-            "./vendor/efsw/src/efsw/platform/posix/SystemImpl.cpp",
-            "./vendor/efsw/src/efsw/platform/posix/ThreadImpl.cpp"
-          ],
-          "cflags": ["-Wall", "-Wno-long-long"]
-        }],
-        ["OS==\"linux\"", {
-          "sources!": [
-            "./vendor/efsw/src/efsw/WatcherKqueue.cpp",
-            "./vendor/efsw/src/efsw/WatcherFSEvents.cpp",
-            "./vendor/efsw/src/efsw/WatcherWin32.cpp",
-            "./vendor/efsw/src/efsw/FileWatcherKqueue.cpp",
-            "./vendor/efsw/src/efsw/FileWatcherWin32.cpp",
-            "./vendor/efsw/src/efsw/FileWatcherFSEvents.cpp"
-          ],
-          "libraries": [
-            "-lpthread"
-          ],
-          "defines": [
-            "EFSW_VERBOSE"
-          ]
-        }],
-        ["OS==\"mac\"", {
-          "sources!": [
-            "./vendor/efsw/src/efsw/WatcherInotify.cpp",
-            "./vendor/efsw/src/efsw/WatcherWin32.cpp",
-            "./vendor/efsw/src/efsw/FileWatcherInotify.cpp",
-            "./vendor/efsw/src/efsw/FileWatcherWin32.cpp"
-          ],
-          "defines": [
-            "EFSW_FSEVENTS_SUPPORTED"
-          ],
-          "xcode_settings": {
-            "OTHER_LDFLAGS": [
-              "-framework CoreFoundation -framework CoreServices"
-            ]
-          }
-        }]
-      ]
-    },
-    {
       "target_name": "pathwatcher",
       "defines": [
         "NODE_API_SWALLOW_UNTHROWABLE_EXCEPTIONS"
       ],
-      "dependencies": ["efsw"],
       "cflags!": ["-fno-exceptions"],
       "cflags_cc!": ["-fno-exceptions"],
       "xcode_settings": {
@@ -112,11 +17,11 @@
       },
       "sources": [
         "lib/core.cc",
-        "lib/core.h"
+        "lib/core.h",
+        "lib/watcher.h"
       ],
       "include_dirs": [
         "<!(node -p \"require('node-addon-api').include_dir\")",
-        "vendor/efsw",
       ],
       "conditions": [
         ['OS=="linux"', {

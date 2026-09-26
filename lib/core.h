@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../vendor/efsw/include/efsw/efsw.hpp"
+#include "watcher.h"
 #include <atomic>
 #include <mutex>
 #include <napi.h>
@@ -37,7 +37,7 @@ typedef ReadDirectoryChangesFileWatcher FileWatcher;
 #define PATH_SEPARATOR '/'
 #endif
 
-typedef efsw::WatchID WatcherHandle;
+typedef pathwatcher::WatchID WatcherHandle;
 
 #ifdef _WIN32
 struct PathTimestampPair {
@@ -52,8 +52,8 @@ struct PathTimestampPair {
 #endif
 
 struct PathWatcherEvent {
-  efsw::Action type;
-  efsw::WatchID handle;
+  pathwatcher::Action type;
+  pathwatcher::WatchID handle;
   std::vector<char> new_path;
   std::vector<char> old_path;
 
@@ -63,7 +63,7 @@ struct PathWatcherEvent {
   PathWatcherEvent() = default;
 
   // Constructor
-  PathWatcherEvent(efsw::Action t, efsw::WatchID h, const std::vector<char> &np,
+  PathWatcherEvent(pathwatcher::Action t, pathwatcher::WatchID h, const std::vector<char> &np,
                    const std::vector<char> &op = std::vector<char>(),
                    const std::string &wp = "")
       : type(t), handle(h), new_path(np), old_path(op), watcher_path(wp) {}
@@ -105,18 +105,18 @@ struct PathWatcherEvent {
   }
 };
 
-class PathWatcherListener : public efsw::FileWatchListener {
+class PathWatcherListener : public pathwatcher::FileWatchListener {
 public:
   PathWatcherListener(Napi::Env env, Napi::ThreadSafeFunction tsfn);
 
-  void handleFileAction(efsw::WatchID watchId, const std::string &dir,
-                        const std::string &filename, efsw::Action action,
+  void handleFileAction(pathwatcher::WatchID watchId, const std::string &dir,
+                        const std::string &filename, pathwatcher::Action action,
                         std::string oldFilename) override;
 
-  void AddPath(PathTimestampPair pair, efsw::WatchID handle);
-  void RemovePath(efsw::WatchID handle);
+  void AddPath(PathTimestampPair pair, pathwatcher::WatchID handle);
+  void RemovePath(pathwatcher::WatchID handle);
   bool HasPath(std::string path);
-  efsw::WatchID GetHandleForPath(std::string path);
+  pathwatcher::WatchID GetHandleForPath(std::string path);
   bool IsEmpty();
   void Stop();
   void Stop(FileWatcher *fileWatcher);
@@ -127,8 +127,8 @@ private:
   std::mutex pathsMutex;
   std::mutex pathsToHandlesMutex;
   Napi::ThreadSafeFunction tsfn;
-  std::unordered_map<efsw::WatchID, PathTimestampPair> paths;
-  std::unordered_map<std::string, efsw::WatchID> pathsToHandles;
+  std::unordered_map<pathwatcher::WatchID, PathTimestampPair> paths;
+  std::unordered_map<std::string, pathwatcher::WatchID> pathsToHandles;
 };
 
 class PathWatcher : public Napi::Addon<PathWatcher> {

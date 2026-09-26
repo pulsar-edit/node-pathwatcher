@@ -107,11 +107,11 @@ std::wstring GetHandlePath(HANDLE handle) {
 // A file action waiting to be delivered to a listener. We gather these while
 // holding `mapMutex` and deliver them after releasing it.
 struct ReadDirectoryChangesFileWatcher::Event {
-  efsw::FileWatchListener *listener;
-  efsw::WatchID handle;
+  pathwatcher::FileWatchListener *listener;
+  pathwatcher::WatchID handle;
   std::string dir;
   std::string filename;
-  efsw::Action action;
+  pathwatcher::Action action;
   std::string oldFilename;
 };
 
@@ -125,9 +125,9 @@ struct ReadDirectoryChangesFileWatcher::Watch {
   std::vector<DWORD> buffer = std::vector<DWORD>(kBufferBytes / sizeof(DWORD));
 
   HANDLE dirHandle = INVALID_HANDLE_VALUE;
-  efsw::WatchID handle = 0;
+  pathwatcher::WatchID handle = 0;
   std::string dir; // UTF-8; always ends with '\\'
-  efsw::FileWatchListener *listener = nullptr;
+  pathwatcher::FileWatchListener *listener = nullptr;
 
   // The path `dirHandle` resolved to when the watch was created. We compare
   // it against the handle's current path on each completion so that we can
@@ -177,21 +177,21 @@ struct ReadDirectoryChangesFileWatcher::Watch {
   // Translates one `FILE_NOTIFY_INFORMATION` record into zero or more events.
   void translate(DWORD action, const std::string &filename,
                  std::vector<Event> &events) {
-    auto emit = [&](const std::string &name, efsw::Action fwAction,
+    auto emit = [&](const std::string &name, pathwatcher::Action fwAction,
                     const std::string &oldName = "") {
       events.push_back({listener, handle, dir, name, fwAction, oldName});
     };
 
     switch (action) {
     case FILE_ACTION_ADDED:
-      emit(filename, efsw::Actions::Add);
+      emit(filename, pathwatcher::Actions::Add);
       break;
     case FILE_ACTION_REMOVED:
-      emit(filename, efsw::Actions::Delete);
+      emit(filename, pathwatcher::Actions::Delete);
       break;
     case FILE_ACTION_MODIFIED:
       if (!isDuplicateModification(filename))
-        emit(filename, efsw::Actions::Modified);
+        emit(filename, pathwatcher::Actions::Modified);
       break;
     case FILE_ACTION_RENAMED_OLD_NAME:
       // Hold on to this until its partner arrives. A rename out of the
@@ -203,10 +203,10 @@ struct ReadDirectoryChangesFileWatcher::Watch {
     case FILE_ACTION_RENAMED_NEW_NAME:
       if (hasPendingOldName) {
         // A rename within the watched directory — often an atomic save.
-        emit(filename, efsw::Actions::Moved, pendingOldName);
+        emit(filename, pathwatcher::Actions::Moved, pendingOldName);
         hasPendingOldName = false;
       } else {
-        emit(filename, efsw::Actions::Add);
+        emit(filename, pathwatcher::Actions::Add);
       }
       break;
     default:
@@ -255,27 +255,27 @@ ReadDirectoryChangesFileWatcher::~ReadDirectoryChangesFileWatcher() {
   CloseHandle((HANDLE)iocp);
 }
 
-efsw::WatchID
+pathwatcher::WatchID
 ReadDirectoryChangesFileWatcher::addWatch(const std::string &path,
-                                          efsw::FileWatchListener *listener,
+                                          pathwatcher::FileWatchListener *listener,
                                           bool /* _useRecursion */) {
 #ifdef DEBUG
   std::cout << "ReadDirectoryChangesFileWatcher::addWatch: " << path
             << std::endl;
 #endif
   if (!isValid)
-    return efsw::Errors::WatcherFailed;
+    return pathwatcher::Errors::WatcherFailed;
 
   std::wstring widePath = ToWidePath(path);
 
   DWORD attributes = GetFileAttributesW(widePath.c_str());
   if (attributes == INVALID_FILE_ATTRIBUTES) {
     return GetLastError() == ERROR_ACCESS_DENIED
-               ? efsw::Errors::FileNotReadable
-               : efsw::Errors::FileNotFound;
+               ? pathwatcher::Errors::FileNotReadable
+               : pathwatcher::Errors::FileNotFound;
   }
   if (!(attributes & FILE_ATTRIBUTE_DIRECTORY))
-    return efsw::Errors::FileNotFound;
+    return pathwatcher::Errors::FileNotFound;
 
   // `FILE_SHARE_DELETE` so that we don't prevent anyone from renaming or
   // deleting the directory we're watching.
@@ -288,11 +288,11 @@ ReadDirectoryChangesFileWatcher::addWatch(const std::string &path,
     switch (GetLastError()) {
     case ERROR_FILE_NOT_FOUND:
     case ERROR_PATH_NOT_FOUND:
-      return efsw::Errors::FileNotFound;
+      return pathwatcher::Errors::FileNotFound;
     case ERROR_ACCESS_DENIED:
-      return efsw::Errors::FileNotReadable;
+      return pathwatcher::Errors::FileNotReadable;
     default:
-      return efsw::Errors::WatcherFailed;
+      return pathwatcher::Errors::WatcherFailed;
     }
   }
 
@@ -311,7 +311,7 @@ ReadDirectoryChangesFileWatcher::addWatch(const std::string &path,
                              reinterpret_cast<ULONG_PTR>(watch),
                              0) == nullptr) {
     destroy(watch);
-    return efsw::Errors::WatcherFailed;
+    return pathwatcher::Errors::WatcherFailed;
   }
 
   // We hold `mapMutex` while arming the watch so that, if a completion packet
@@ -321,7 +321,7 @@ ReadDirectoryChangesFileWatcher::addWatch(const std::string &path,
 
   if (!arm(watch)) {
     destroy(watch);
-    return efsw::Errors::WatcherFailed;
+    return pathwatcher::Errors::WatcherFailed;
   }
 
   watch->handle = nextHandleID++;
@@ -329,7 +329,7 @@ ReadDirectoryChangesFileWatcher::addWatch(const std::string &path,
   return watch->handle;
 }
 
-void ReadDirectoryChangesFileWatcher::removeWatch(efsw::WatchID handle) {
+void ReadDirectoryChangesFileWatcher::removeWatch(pathwatcher::WatchID handle) {
   std::lock_guard<std::mutex> lock(mapMutex);
   auto it = handlesToWatches.find(handle);
   if (it == handlesToWatches.end())

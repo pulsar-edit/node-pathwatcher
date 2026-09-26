@@ -7,7 +7,7 @@
 #include <iostream>
 #endif
 
-// This is an API-compatible replacement for `efsw::FileWatcher` on macOS. It
+// This is an API-compatible replacement for efsw’s `FileWatcher` on macOS. It
 // uses its own implementation of `FSEvents` so it can minimize the number of
 // streams created in comparison to `efsw`’s approach of using one stream per
 // watched path.
@@ -191,9 +191,9 @@ FSEventsFileWatcher::~FSEventsFileWatcher() {
   }
 }
 
-efsw::WatchID FSEventsFileWatcher::addWatch(
+pathwatcher::WatchID FSEventsFileWatcher::addWatch(
   const std::string& directory,
-  efsw::FileWatchListener* listener,
+  pathwatcher::FileWatchListener* listener,
   // The `_useRecursion` flag is ignored; it's present for API compatibility.
   bool _useRecursion
 ) {
@@ -209,7 +209,7 @@ efsw::WatchID FSEventsFileWatcher::addWatch(
     watchDir = PathWithoutFileName(directory, false);
   }
 
-  efsw::WatchID handle = nextHandleID++;
+  pathwatcher::WatchID handle = nextHandleID++;
   {
     std::lock_guard<std::mutex> lock(mapMutex);
     handlesToPaths[handle] = watchDir;
@@ -228,26 +228,26 @@ efsw::WatchID FSEventsFileWatcher::addWatch(
     // so the new path is the most likely culprit.)
     if (stat(watchDir.c_str(), &st) != 0) {
       if (errno == EACCES || errno == EPERM) {
-        return efsw::Errors::FileNotReadable;
+        return pathwatcher::Errors::FileNotReadable;
       }
-      return efsw::Errors::FileNotFound;
+      return pathwatcher::Errors::FileNotFound;
     }
 
     struct statfs sfsb;
     if (statfs(watchDir.c_str(), &sfsb) == 0) {
       if (!(sfsb.f_flags & MNT_LOCAL)) {
-        return efsw::Errors::FileRemote;
+        return pathwatcher::Errors::FileRemote;
       }
     }
 
-    return efsw::Errors::WatcherFailed;
+    return pathwatcher::Errors::WatcherFailed;
   }
 
   return handle;
 }
 
 void FSEventsFileWatcher::removeWatch(
-  efsw::WatchID handle
+  pathwatcher::WatchID handle
 ) {
   auto remainingCount = removeHandle(handle);
 
@@ -314,13 +314,13 @@ void FSEventsFileWatcher::FSEventCallback(
 }
 
 void FSEventsFileWatcher::sendFileAction(
-  efsw::WatchID watchid,
+  pathwatcher::WatchID watchid,
   const std::string& dir,
   const std::string& filename,
-  efsw::Action action,
+  pathwatcher::Action action,
   std::string oldFilename
 ) {
-  efsw::FileWatchListener* listener;
+  pathwatcher::FileWatchListener* listener;
   auto it = handlesToListeners.find(watchid);
   if (it == handlesToListeners.end()) return;
   listener = it->second;
@@ -335,7 +335,7 @@ void FSEventsFileWatcher::sendFileAction(
 }
 
 struct FileEventMatch {
-  efsw::WatchID handle;
+  pathwatcher::WatchID handle;
   std::string path;
 };
 
@@ -356,7 +356,7 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
       kFSEventStreamEventFlagRootChanged
     )) continue;
 
-    efsw::WatchID handle;
+    pathwatcher::WatchID handle;
     std::string path;
 
     {
@@ -443,10 +443,10 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
               0 == strcasecmp(event.path.c_str(), nEvent.path.c_str())
             ) {
               // Move from one path to the other.
-              sendFileAction(handle, dirPath, newFilepath, efsw::Actions::Moved, filePath);
+              sendFileAction(handle, dirPath, newFilepath, pathwatcher::Actions::Moved, filePath);
             } else {
               // Move in the opposite direction.
-              sendFileAction(handle, dirPath, filePath, efsw::Actions::Moved, newFilepath);
+              sendFileAction(handle, dirPath, filePath, pathwatcher::Actions::Moved, newFilepath);
             }
           } else {
             // This is a move from one directory to another. Use PathExists to
@@ -457,15 +457,15 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
             // directory is renamed over the target file inside it.
             if (!PathExists(event.path)) {
               // event is the source; the file moved out of our watched dir.
-              sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
-              sendFileAction(handle, newDir, newFilepath, efsw::Actions::Add);
+              sendFileAction(handle, dirPath, filePath, pathwatcher::Actions::Delete);
+              sendFileAction(handle, newDir, newFilepath, pathwatcher::Actions::Add);
             } else {
               // event is the destination; the file was moved into our watched
               // dir (e.g. an atomic save from a temp directory).
-              sendFileAction(handle, newDir, newFilepath, efsw::Actions::Delete);
-              sendFileAction(handle, dirPath, filePath, efsw::Actions::Add);
+              sendFileAction(handle, newDir, newFilepath, pathwatcher::Actions::Delete);
+              sendFileAction(handle, dirPath, filePath, pathwatcher::Actions::Add);
               if (nEvent.flags & shorthandFSEventsModified) {
-                sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
+                sendFileAction(handle, dirPath, filePath, pathwatcher::Actions::Modified);
               }
             }
           }
@@ -490,14 +490,14 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
       } else if (PathExists(event.path)) {
         // Treat remaining renames as creations when we know the path still
         // exists…
-        sendFileAction(handle, dirPath, filePath, efsw::Actions::Add);
+        sendFileAction(handle, dirPath, filePath, pathwatcher::Actions::Add);
 
         if (event.flags & shorthandFSEventsModified) {
-          sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
+          sendFileAction(handle, dirPath, filePath, pathwatcher::Actions::Modified);
         }
       } else {
         // …and as deletions when we know the path doesn’t still exist.
-        sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
+        sendFileAction(handle, dirPath, filePath, pathwatcher::Actions::Delete);
       }
     } else {
       // Ordinary business — new files, changed, files, deleted files.
@@ -507,7 +507,7 @@ void FSEventsFileWatcher::handleActions(std::vector<FSEvent>& events) {
 }
 
 void FSEventsFileWatcher::handleAddModDel(
-  efsw::WatchID handle,
+  pathwatcher::WatchID handle,
   const uint32_t& flags,
   const std::string& path,
   std::string& dirPath,
@@ -517,25 +517,25 @@ void FSEventsFileWatcher::handleAddModDel(
     // This claims to be a file creation; make sure it exists on disk before
     // triggering an event.
     if (PathExists(path)) {
-      sendFileAction(handle, dirPath, filePath, efsw::Actions::Add);
+      sendFileAction(handle, dirPath, filePath, pathwatcher::Actions::Add);
     }
   }
 
   if (flags & shorthandFSEventsModified) {
-    sendFileAction(handle, dirPath, filePath, efsw::Actions::Modified);
+    sendFileAction(handle, dirPath, filePath, pathwatcher::Actions::Modified);
   }
 
   if (flags & kFSEventStreamEventFlagItemRemoved) {
     // This claims to be a file deletion; make sure it doesn't exist on disk
     // before triggering an event.
     if (!PathExists(path)) {
-      sendFileAction(handle, dirPath, filePath, efsw::Actions::Delete);
+      sendFileAction(handle, dirPath, filePath, pathwatcher::Actions::Delete);
     }
   }
 }
 
 // Private: clean up a handle from both unordered maps.
-size_t FSEventsFileWatcher::removeHandle(efsw::WatchID handle) {
+size_t FSEventsFileWatcher::removeHandle(pathwatcher::WatchID handle) {
   // If we're destroyed (or about to destroy ourselves), don't try to do
   // anything to these maps; the mutex lock will fail.
   if (!isValid || pendingDestruction) return 0;
@@ -579,7 +579,7 @@ void FSEventsFileWatcher::process() {
   for (const auto& dir : dirsCopy) {
     if (pendingDestruction) return;
 
-    efsw::WatchID handle;
+    pathwatcher::WatchID handle;
     std::string path;
 
     {
@@ -597,7 +597,7 @@ void FSEventsFileWatcher::process() {
       handle,
       PathWithoutFileName(dir),
       FileNameFromPath(dir),
-      efsw::Actions::Modified
+      pathwatcher::Actions::Modified
     );
 
     if (pendingDestruction) return;

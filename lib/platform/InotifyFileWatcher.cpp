@@ -67,14 +67,14 @@ InotifyFileWatcher::~InotifyFileWatcher() {
     close(inotifyFd);
 }
 
-efsw::WatchID InotifyFileWatcher::addWatch(const std::string &path,
-                                           efsw::FileWatchListener *listener,
+pathwatcher::WatchID InotifyFileWatcher::addWatch(const std::string &path,
+                                           pathwatcher::FileWatchListener *listener,
                                            bool /* _useRecursion */) {
 #ifdef DEBUG
   std::cout << "InotifyFileWatcher::addWatch: " << path << std::endl;
 #endif
   if (!isValid)
-    return efsw::Errors::WatcherFailed;
+    return pathwatcher::Errors::WatcherFailed;
 
   std::string dir = path;
   if (dir.empty() || dir.back() != '/')
@@ -92,21 +92,21 @@ efsw::WatchID InotifyFileWatcher::addWatch(const std::string &path,
   if (wd < 0) {
     switch (errno) {
     case ENOENT:
-      return efsw::Errors::FileNotFound;
+      return pathwatcher::Errors::FileNotFound;
     case EACCES:
-      return efsw::Errors::FileNotReadable;
+      return pathwatcher::Errors::FileNotReadable;
     default:
-      return efsw::Errors::WatcherFailed;
+      return pathwatcher::Errors::WatcherFailed;
     }
   }
 
-  efsw::WatchID handle = nextHandleID++;
+  pathwatcher::WatchID handle = nextHandleID++;
   handlesToWatches[handle] = {dir, listener, wd};
   wdToHandles.insert({wd, handle});
   return handle;
 }
 
-void InotifyFileWatcher::removeWatch(efsw::WatchID handle) {
+void InotifyFileWatcher::removeWatch(pathwatcher::WatchID handle) {
   // We hold `mapMutex` across the `inotify_rm_watch()` call below. That's
   // load-bearing: it ensures we've recorded that we're expecting an
   // IN_IGNORED before the event loop — which takes the same lock in
@@ -178,11 +178,11 @@ void InotifyFileWatcher::stopWatch(int wd) {
 }
 
 void InotifyFileWatcher::sendFileAction(int wd, const std::string &filename,
-                                        efsw::Action action,
+                                        pathwatcher::Action action,
                                         const std::string &oldFilename) {
   // Copy out (handle, dir, listener) under the lock, then call into listener
   // code without holding it.
-  std::vector<std::tuple<efsw::WatchID, std::string, efsw::FileWatchListener *>>
+  std::vector<std::tuple<pathwatcher::WatchID, std::string, pathwatcher::FileWatchListener *>>
       targets;
   {
     std::lock_guard<std::mutex> lock(mapMutex);
@@ -215,7 +215,7 @@ void InotifyFileWatcher::eventLoop() {
       return;
     // No matching IN_MOVED_TO arrived: the file was moved somewhere we're not
     // watching (or out of the filesystem entirely).
-    sendFileAction(pendingWd, pendingFilename, efsw::Actions::Delete);
+    sendFileAction(pendingWd, pendingFilename, pathwatcher::Actions::Delete);
     hasPendingMove = false;
   };
 
@@ -288,7 +288,7 @@ void InotifyFileWatcher::eventLoop() {
         if ((event->mask & IN_MOVED_TO) && event->wd == pendingWd &&
             event->cookie == pendingCookie) {
           // Same-directory rename — almost always an atomic save.
-          sendFileAction(event->wd, filename, efsw::Actions::Moved,
+          sendFileAction(event->wd, filename, pathwatcher::Actions::Moved,
                          pendingFilename);
           hasPendingMove = false;
           continue;
@@ -320,7 +320,7 @@ void InotifyFileWatcher::eventLoop() {
         //
         // This must happen before any teardown below, since `sendFileAction`
         // finds its listeners by looking up `wd` in our bookkeeping.
-        sendFileAction(event->wd, "", efsw::Actions::Delete);
+        sendFileAction(event->wd, "", pathwatcher::Actions::Delete);
 
         if (event->mask & IN_MOVE_SELF) {
           // Unlike a deletion, a move leaves the watch alive — the directory
@@ -335,16 +335,16 @@ void InotifyFileWatcher::eventLoop() {
       }
 
       if (event->mask & IN_CREATE) {
-        sendFileAction(event->wd, filename, efsw::Actions::Add);
+        sendFileAction(event->wd, filename, pathwatcher::Actions::Add);
       } else if (event->mask & IN_DELETE) {
-        sendFileAction(event->wd, filename, efsw::Actions::Delete);
+        sendFileAction(event->wd, filename, pathwatcher::Actions::Delete);
       } else if (event->mask & IN_MOVED_TO) {
         // Arrived from outside this directory (or its IN_MOVED_FROM partner
         // already timed out): treat it as a brand-new file.
-        sendFileAction(event->wd, filename, efsw::Actions::Add);
-        sendFileAction(event->wd, filename, efsw::Actions::Modified);
+        sendFileAction(event->wd, filename, pathwatcher::Actions::Add);
+        sendFileAction(event->wd, filename, pathwatcher::Actions::Modified);
       } else if (event->mask & (IN_MODIFY | IN_CLOSE_WRITE)) {
-        sendFileAction(event->wd, filename, efsw::Actions::Modified);
+        sendFileAction(event->wd, filename, pathwatcher::Actions::Modified);
       }
     }
   }
