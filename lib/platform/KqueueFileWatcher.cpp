@@ -36,6 +36,17 @@ static std::pair<std::string, std::string> SplitPath(const std::string &path) {
   return {p.substr(0, pos + 1), p.substr(pos + 1)};
 }
 
+// Whether `path` still names the file that `fd` is open on. Compares inode
+// identity rather than paths, so it isn't fooled by hard links or by different
+// spellings of the same path (e.g., `/var` vs. `/private/var`).
+static bool IsStillAtPath(int fd, const std::string &path) {
+  struct stat atPath;
+  struct stat watched;
+  if (stat(path.c_str(), &atPath) != 0 || fstat(fd, &watched) != 0)
+    return false;
+  return atPath.st_dev == watched.st_dev && atPath.st_ino == watched.st_ino;
+}
+
 // Raise the process soft fd limit to the hard limit. On macOS the hard limit
 // for unprivileged processes is KERN_MAXFILESPERPROC (10240 by default), which
 // is sufficient headroom for any realistic editor workload. This is a
@@ -307,6 +318,18 @@ void KqueueFileWatcher::eventLoop() {
         sendFileAction(handle, dir, filename, pathwatcher::Actions::Delete);
       }
 
+    } else if (!IsStillAtPath(fd, watchedPath)) {
+      // The file we're watching no longer lives at the path we were asked to
+      // watch. The file itself didn't move — we'd have gotten NOTE_RENAME —
+      // so one of its ancestor directories did. The fd follows the inode, so
+      // it would go on reporting changes to the file at its new location
+      // under the old path, which by now may name some other file entirely.
+      //
+      // Stop watching instead, and report nothing, just as the other
+      // platforms' watchers stop when a watched directory moves. We can't
+      // notice this until the file changes, but until then there's nothing
+      // to report anyway.
+      closeFd(handle, fd);
     } else if (event.fflags & NOTE_WRITE) {
       sendFileAction(handle, dir, filename, pathwatcher::Actions::Modified);
     } else if (event.fflags & NOTE_ATTRIB) {

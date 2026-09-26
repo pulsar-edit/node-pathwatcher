@@ -100,9 +100,9 @@ static void ProcessEvent(Napi::Env env, Napi::Function callback,
   //
   // NOTE: This library previously envisioned that some platforms would allow
   // watching of files directly and some would require watching of a file's
-  // parent folder. We use the parent-folder approach on all platforms, so
-  // in practice we're not using half of the event names we used to use. That's
-  // why the second argument below is `true`.
+  // parent folder. We frequently use the parent-folder approach, so in
+  // practice we're sometimes not using half of the event names we used to use.
+  // That's why the second argument below is `true`.
   //
   // There might be some edge cases that we need to handle here; for instance,
   // if we're watching a directory and that directory itself is deleted, then

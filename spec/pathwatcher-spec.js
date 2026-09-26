@@ -242,18 +242,23 @@ describe('PathWatcher', () => {
   // watch went on reporting events under the path the directory had when we
   // started watching it.
   describe('when the parent directory of a watched file is renamed', () => {
-    let movedDir;
+    // Directories each spec creates under the shared `tempDir`, which must be
+    // gone before the next spec runs.
+    let dirsToClean = [];
 
     afterEach(() => {
-      if (movedDir && fs.existsSync(movedDir)) {
-        fs.rmSync(movedDir, { recursive: true });
+      for (let dir of dirsToClean) {
+        if (fs.existsSync(dir)) {
+          fs.rmSync(dir, { recursive: true });
+        }
       }
-      movedDir = null;
+      dirsToClean = [];
     });
 
     it('stops reporting changes against the old path', async () => {
       let subDir = path.join(tempDir, 'renamed-parent');
       fs.mkdirSync(subDir);
+      dirsToClean.push(subDir);
       let watchedFile = path.join(subDir, 'file');
       fs.writeFileSync(watchedFile, '');
 
@@ -268,7 +273,8 @@ describe('PathWatcher', () => {
       expect(spy).toHaveBeenCalledWith('change', '');
 
       // Now rename the directory that contains the file we're watching.
-      movedDir = path.join(tempDir, 'renamed-parent-moved');
+      let movedDir = path.join(tempDir, 'renamed-parent-moved');
+      dirsToClean.push(movedDir);
       fs.renameSync(subDir, movedDir);
       await wait(200);
 
@@ -280,6 +286,48 @@ describe('PathWatcher', () => {
       await wait(200);
 
       expect(fs.existsSync(watchedFile)).toBe(false);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    // The previous spec can pass merely because nothing exists at the old
+    // path anymore. The mistake it guards against is easier to see once
+    // something does: a watcher that is still following the moved file, and
+    // still reporting under the old path, would now attribute changes to the
+    // wrong file.
+    it('still stops reporting changes against the old path once a new file exists there', async () => {
+      let subDir = path.join(tempDir, 'recreated-parent');
+      fs.mkdirSync(subDir);
+      dirsToClean.push(subDir);
+      let watchedFile = path.join(subDir, 'file');
+      fs.writeFileSync(watchedFile, '');
+
+      let spy = jasmine.createSpy('spy');
+      PathWatcher.watch(watchedFile, spy);
+      await wait(20);
+
+      fs.writeFileSync(watchedFile, 'changed');
+      await condition(() => spy.calls.count() > 0);
+      expect(spy).toHaveBeenCalledWith('change', '');
+
+      let movedDir = path.join(tempDir, 'recreated-parent-moved');
+      dirsToClean.push(movedDir);
+      fs.renameSync(subDir, movedDir);
+      await wait(200);
+
+      // Put a different file at the path we were asked to watch. We don't
+      // assert anything about how this is reported; backends are free to
+      // notice it or not.
+      fs.mkdirSync(subDir);
+      fs.writeFileSync(watchedFile, 'a different file');
+      await wait(200);
+
+      spy.calls.reset();
+
+      // A write to the _moved_ file must not be reported as a change to the
+      // file that now lives at the old path.
+      fs.writeFileSync(path.join(movedDir, 'file'), 'changed again');
+      await wait(200);
+
       expect(spy).not.toHaveBeenCalled();
     });
   });

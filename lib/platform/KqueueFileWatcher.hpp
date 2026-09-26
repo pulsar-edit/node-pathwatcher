@@ -8,7 +8,7 @@
 #include "../watcher.h"
 
 // An API-compatible replacement for FSEventsFileWatcher that uses kqueue
-// instead of FSEvents. Intended for experimentation; swap in via core.h.
+// instead of FSEvents.
 //
 // Key differences from FSEventsFileWatcher:
 // - No daemon dependency (no fseventsd); pure kernel interface.
@@ -17,6 +17,9 @@
 // - Watches inode identity, not path identity: when a file is renamed, the
 //   fd follows the inode. Atomic saves (which replace the inode) are detected
 //   via stat() after NOTE_DELETE and reported as Modified rather than Delete.
+//   If an ancestor directory moves, the fd follows the file to its new
+//   location; we notice on the file's next change, when the watched path no
+//   longer names the same inode, and stop watching without reporting.
 // - No recursive watching; the _useRecursion flag is ignored.
 class KqueueFileWatcher {
 public:
