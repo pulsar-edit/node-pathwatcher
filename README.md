@@ -4,11 +4,9 @@ Watch files and directories for changes.
 
 
 > [!IMPORTANT]
-> This library is used in [Pulsar][] in several places for compatibility reasons. The [nsfw](https://www.npmjs.com/package/nsfw) library is more robust and more widely used; it is available in Pulsar via `atom.watchPath` and is usually a better choice.
+> This library is used in [Pulsar][] in several places for compatibility reasons. If you’re here because you want a general-purpose file-watching library for Node, use `nsfw` or `@parcel/watcher` instead.
 >
-> If you’re here because you want a general-purpose file-watching library for Node, use `nsfw` instead.
->
-> The purpose of this library’s continued inclusion in Pulsar is to provide the [File][] and [Directory][] classes that have long been available as exports via `require('atom')`.
+> The purpose of this library’s continued inclusion in Pulsar is to provide the [File][] and [Directory][] classes that have long been available as exports via `require('atom')`. It also delivers reliable file-watching on macOS on volumes that `FSEvents` cannot support (i.e., network volumes and drives that use incompatible filesystems).
 
 ## Installing
 
@@ -29,10 +27,12 @@ This module is context-aware and context-safe; it can be used from multiple work
 
 If you’re using it in an Electron renderer process, you must take extra care in page reloading scenarios. Be sure to use `closeAllWatchers` well before the page environment is terminated — e.g., by attaching a `beforeunload` listener.
 
+Be sure to read the more specific file-watching caveats below.
+
 ## Using
 
 ```js
-const PathWatcher = require('pathwatcher');
+const { watch, closeAllWatchers, getWatchedPaths } = require('pathwatcher');
 ```
 
 ### `watch(filename, listener)`
@@ -47,14 +47,11 @@ Returns an instance of `PathWatcher`. This instance is useful primarily for the 
 
 #### Caveats
 
-* Watching a specific file or directory will not notify you when that file or directory is created, since the file must already exist before you start watching the path.
+* All watching is **non-recursive**. If you watch `/foo/bar`, you will be notified about a change to `/foo/bar/index.js`, or the creation of the directory `/foo/bar/baz`; but you will not be told about a change to `/foo/bar/baz/something.js`.
+* You may not watch a nonexistent path. Thus watching a specific file or directory can never notify you when that file or directory is created.
 * When watching a file, `event` can be any of `rename`, `delete`, or `change`, where `change` means that the file’s contents changed somehow.
-* When watching a directory, `event` can only be `change`, and in this context `change` signifies that one or more of the directory’s children changed (by being renamed, deleted, added, or modified).
-* A watched directory will not report when it is renamed or deleted. If you want to detect when a given directory is deleted, watch its parent directory and test for the child directory’s existence when you receive a `change` event.
-
-### `PathWatcher::close()`
-
-Stop watching for changes on the given `PathWatcher`.
+* When watching a directory, `event` can **only** be `change`, and in this context `change` signifies that one or more of the directory’s children changed (by being renamed, deleted, added, or modified).
+* A watched directory will not report when it is renamed or deleted; it will simply stop reporting events. If you want to detect when a given directory is renamed or deleted, watch its parent directory and test for the child directory’s existence when you receive a `change` event. (But if the parent directory itself can possibly be renamed or deleted, you’re in a pickle! This scenario is better suited to a recursive watcher.)
 
 ### `closeAllWatchers()`
 
@@ -62,9 +59,16 @@ Stop watching on all subscribed paths.  All existing `PathWatcher` instances wil
 
 ### `getWatchedPaths()`
 
-Returns an array of strings representing the actual paths that are being watched on disk.
+Returns an array of strings representing the **actual paths** that are being watched on disk.
 
-`pathwatcher` watches directories in all instances, since it’s easy to do so in a cross-platform manner.
+These paths may not correlate to the paths that a consumer asked to watch for two reasons:
+
+* Some platforms, when asked to watch `/foo/bar.js`, watch `/foo` instead. This allows for watcher reuse in some scenarios and would explain why the number of watched paths may not correlate to the number of active watchers.
+* `pathwatcher` does `realpath` resolution and watches at a path’s canonical location on disk — which may or may not match the path you asked to watch.
+
+### `PathWatcher::close()`
+
+Stop watching for changes on the given `PathWatcher`.
 
 ### `File` and `Directory`
 

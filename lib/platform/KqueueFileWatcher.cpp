@@ -36,6 +36,17 @@ static std::pair<std::string, std::string> SplitPath(const std::string &path) {
   return {p.substr(0, pos + 1), p.substr(pos + 1)};
 }
 
+// Whether `path` still names the file that `fd` is open on. Compares inode
+// identity rather than paths, so it isn't fooled by hard links or by different
+// spellings of the same path (e.g., `/var` vs. `/private/var`).
+static bool IsStillAtPath(int fd, const std::string &path) {
+  struct stat atPath;
+  struct stat watched;
+  if (stat(path.c_str(), &atPath) != 0 || fstat(fd, &watched) != 0)
+    return false;
+  return atPath.st_dev == watched.st_dev && atPath.st_ino == watched.st_ino;
+}
+
 // Raise the process soft fd limit to the hard limit. On macOS the hard limit
 // for unprivileged processes is KERN_MAXFILESPERPROC (10240 by default), which
 // is sufficient headroom for any realistic editor workload. This is a
@@ -99,28 +110,28 @@ KqueueFileWatcher::~KqueueFileWatcher() {
   close(kqueueFd);
 }
 
-efsw::WatchID KqueueFileWatcher::addWatch(const std::string &path,
-                                          efsw::FileWatchListener *listener,
+pathwatcher::WatchID KqueueFileWatcher::addWatch(const std::string &path,
+                                          pathwatcher::FileWatchListener *listener,
                                           bool /* _useRecursion */
 ) {
   if (!isValid) {
-    return efsw::Errors::WatcherFailed;
+    return pathwatcher::Errors::WatcherFailed;
   }
 
   int fd = open(path.c_str(), O_EVTONLY);
   if (fd < 0) {
     switch (errno) {
     case ENOENT:
-      return efsw::Errors::FileNotFound;
+      return pathwatcher::Errors::FileNotFound;
     case EACCES:
     case EPERM:
-      return efsw::Errors::FileNotReadable;
+      return pathwatcher::Errors::FileNotReadable;
     default:
-      return efsw::Errors::WatcherFailed;
+      return pathwatcher::Errors::WatcherFailed;
     }
   }
 
-  efsw::WatchID handle;
+  pathwatcher::WatchID handle;
   {
     std::lock_guard<std::mutex> lock(mapMutex);
     handle = nextHandleID++;
@@ -145,13 +156,13 @@ efsw::WatchID KqueueFileWatcher::addWatch(const std::string &path,
     handlesToPaths.erase(handle);
     handlesToListeners.erase(handle);
     close(fd);
-    return efsw::Errors::WatcherFailed;
+    return pathwatcher::Errors::WatcherFailed;
   }
 
   return handle;
 }
 
-void KqueueFileWatcher::removeWatch(efsw::WatchID handle) {
+void KqueueFileWatcher::removeWatch(pathwatcher::WatchID handle) {
   int fd = -1;
   {
     std::lock_guard<std::mutex> lock(mapMutex);
@@ -172,12 +183,12 @@ void KqueueFileWatcher::removeWatch(efsw::WatchID handle) {
     close(fd);
 }
 
-void KqueueFileWatcher::sendFileAction(efsw::WatchID handle,
+void KqueueFileWatcher::sendFileAction(pathwatcher::WatchID handle,
                                        const std::string &dir,
                                        const std::string &filename,
-                                       efsw::Action action,
+                                       pathwatcher::Action action,
                                        const std::string &oldFilename) {
-  efsw::FileWatchListener *listener = nullptr;
+  pathwatcher::FileWatchListener *listener = nullptr;
   {
     std::lock_guard<std::mutex> lock(mapMutex);
     auto it = handlesToListeners.find(handle);
@@ -188,7 +199,7 @@ void KqueueFileWatcher::sendFileAction(efsw::WatchID handle,
   listener->handleFileAction(handle, dir, filename, action, oldFilename);
 }
 
-void KqueueFileWatcher::closeFd(efsw::WatchID handle, int fd) {
+void KqueueFileWatcher::closeFd(pathwatcher::WatchID handle, int fd) {
   {
     std::lock_guard<std::mutex> lock(mapMutex);
     handlesToFds.erase(handle);
@@ -197,7 +208,7 @@ void KqueueFileWatcher::closeFd(efsw::WatchID handle, int fd) {
   close(fd);
 }
 
-bool KqueueFileWatcher::reopenFd(efsw::WatchID handle,
+bool KqueueFileWatcher::reopenFd(pathwatcher::WatchID handle,
                                  const std::string &path) {
   int newFd = open(path.c_str(), O_EVTONLY);
   if (newFd < 0)
@@ -245,8 +256,8 @@ void KqueueFileWatcher::eventLoop() {
     // Recover the handle from the udata we stored at registration time.
     // This avoids a map lookup on the fd, which could be stale if the fd
     // was closed and its number reused by the OS.
-    efsw::WatchID handle =
-        static_cast<efsw::WatchID>(reinterpret_cast<intptr_t>(event.udata));
+    pathwatcher::WatchID handle =
+        static_cast<pathwatcher::WatchID>(reinterpret_cast<intptr_t>(event.udata));
 
     // Confirm the handle is still registered. If removeWatch() was called
     // between the event being queued and us processing it, skip.
@@ -280,14 +291,14 @@ void KqueueFileWatcher::eventLoop() {
         std::pair<std::string, std::string> newParts = SplitPath(newPath);
         if (parts.first != newParts.first) {
           // Treat moves outside of the directory as deletions.
-          sendFileAction(handle, dir, filename, efsw::Actions::Delete);
+          sendFileAction(handle, dir, filename, pathwatcher::Actions::Delete);
         } else {
           sendFileAction(handle, newParts.first, newParts.second,
-                         efsw::Actions::Moved, filename);
+                         pathwatcher::Actions::Moved, filename);
         }
       } else {
         // F_GETPATH failed or returned the same path — treat as a deletion.
-        sendFileAction(handle, dir, filename, efsw::Actions::Delete);
+        sendFileAction(handle, dir, filename, pathwatcher::Actions::Delete);
       }
 
     } else if (event.fflags & NOTE_DELETE) {
@@ -301,19 +312,31 @@ void KqueueFileWatcher::eventLoop() {
       if (stat(watchedPath.c_str(), &st) == 0 &&
           reopenFd(handle, watchedPath)) {
         // A new file appeared at the same path: atomic save.
-        sendFileAction(handle, dir, filename, efsw::Actions::Modified);
+        sendFileAction(handle, dir, filename, pathwatcher::Actions::Modified);
       } else {
         // The path is genuinely gone.
-        sendFileAction(handle, dir, filename, efsw::Actions::Delete);
+        sendFileAction(handle, dir, filename, pathwatcher::Actions::Delete);
       }
 
+    } else if (!IsStillAtPath(fd, watchedPath)) {
+      // The file we're watching no longer lives at the path we were asked to
+      // watch. The file itself didn't move — we'd have gotten NOTE_RENAME —
+      // so one of its ancestor directories did. The fd follows the inode, so
+      // it would go on reporting changes to the file at its new location
+      // under the old path, which by now may name some other file entirely.
+      //
+      // Stop watching instead, and report nothing, just as the other
+      // platforms' watchers stop when a watched directory moves. We can't
+      // notice this until the file changes, but until then there's nothing
+      // to report anyway.
+      closeFd(handle, fd);
     } else if (event.fflags & NOTE_WRITE) {
-      sendFileAction(handle, dir, filename, efsw::Actions::Modified);
+      sendFileAction(handle, dir, filename, pathwatcher::Actions::Modified);
     } else if (event.fflags & NOTE_ATTRIB) {
       // macOS sometimes skips NOTE_WRITE when a file is truncated to empty,
       // firing NOTE_ATTRIB instead. Detect this by seeking to the end.
       if (lseek(fd, 0, SEEK_END) == 0) {
-        sendFileAction(handle, dir, filename, efsw::Actions::Modified);
+        sendFileAction(handle, dir, filename, pathwatcher::Actions::Modified);
       }
     }
   }

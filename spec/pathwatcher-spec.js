@@ -40,6 +40,38 @@ describe('PathWatcher', () => {
       expect(eventType).toBe('change');
       expect(eventPath).toBe('');
     });
+
+    it('keeps watching the file that replaced the original', async () => {
+      // An atomic save doesn't modify the watched file; it replaces it with a
+      // different one. Platforms that watch the file itself (rather than its
+      // parent directory) therefore have to notice this and re-attach to
+      // whatever now lives at that path — otherwise the save gets reported and
+      // nothing ever is again.
+      let spy = jasmine.createSpy('spy');
+      PathWatcher.watch(tempFile, spy);
+
+      await wait(20);
+
+      let tempFileCopy = path.join(tempDir, 'file-copy');
+      fs.writeFileSync(tempFileCopy, 'atomic save content');
+      fs.renameSync(tempFileCopy, tempFile);
+
+      await condition(() => spy.calls.count() > 0);
+      expect(spy).toHaveBeenCalledWith('change', '');
+
+      // Let any further events from the save itself land before we reset, so
+      // that a straggler can't be mistaken for the event we're about to
+      // provoke.
+      await wait(200);
+      spy.calls.reset();
+
+      // The real test: an ordinary write to the file that now occupies the
+      // watched path must still be reported.
+      fs.writeFileSync(tempFile, 'subsequent change');
+
+      await condition(() => spy.calls.count() > 0);
+      expect(spy).toHaveBeenCalledWith('change', '');
+    });
   });
 
   describe('getWatchedPaths', () => {
@@ -196,6 +228,109 @@ describe('PathWatcher', () => {
       });
     });
   }
+
+  // Once the directory containing a watched file is renamed away, the file we
+  // were asked to watch no longer exists at the path we were asked to watch.
+  // Writes to the file at its new location should not be reported as changes
+  // to the old path. This should hold on every platform, so this block also
+  // serves to keep the backends in agreement with each other.
+  //
+  // Linux got this wrong: we watch a file there by watching its parent
+  // directory, and `inotify` watches that directory itself rather than its
+  // name. A rename leaves the watch alive — the directory still exists, just
+  // somewhere else — while giving us no way to learn its new path, so the
+  // watch went on reporting events under the path the directory had when we
+  // started watching it.
+  describe('when the parent directory of a watched file is renamed', () => {
+    // Directories each spec creates under the shared `tempDir`, which must be
+    // gone before the next spec runs.
+    let dirsToClean = [];
+
+    afterEach(() => {
+      for (let dir of dirsToClean) {
+        if (fs.existsSync(dir)) {
+          fs.rmSync(dir, { recursive: true });
+        }
+      }
+      dirsToClean = [];
+    });
+
+    it('stops reporting changes against the old path', async () => {
+      let subDir = path.join(tempDir, 'renamed-parent');
+      fs.mkdirSync(subDir);
+      dirsToClean.push(subDir);
+      let watchedFile = path.join(subDir, 'file');
+      fs.writeFileSync(watchedFile, '');
+
+      let spy = jasmine.createSpy('spy');
+      PathWatcher.watch(watchedFile, spy);
+      await wait(20);
+
+      // First prove that the watcher works at all, so that the assertion at
+      // the end can't pass merely because we set something up wrong.
+      fs.writeFileSync(watchedFile, 'changed');
+      await condition(() => spy.calls.count() > 0);
+      expect(spy).toHaveBeenCalledWith('change', '');
+
+      // Now rename the directory that contains the file we're watching.
+      let movedDir = path.join(tempDir, 'renamed-parent-moved');
+      dirsToClean.push(movedDir);
+      fs.renameSync(subDir, movedDir);
+      await wait(200);
+
+      spy.calls.reset();
+
+      // A write to the file at its _new_ path must not be reported as a change
+      // to the old one.
+      fs.writeFileSync(path.join(movedDir, 'file'), 'changed again');
+      await wait(200);
+
+      expect(fs.existsSync(watchedFile)).toBe(false);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    // The previous spec can pass merely because nothing exists at the old
+    // path anymore. The mistake it guards against is easier to see once
+    // something does: a watcher that is still following the moved file, and
+    // still reporting under the old path, would now attribute changes to the
+    // wrong file.
+    it('still stops reporting changes against the old path once a new file exists there', async () => {
+      let subDir = path.join(tempDir, 'recreated-parent');
+      fs.mkdirSync(subDir);
+      dirsToClean.push(subDir);
+      let watchedFile = path.join(subDir, 'file');
+      fs.writeFileSync(watchedFile, '');
+
+      let spy = jasmine.createSpy('spy');
+      PathWatcher.watch(watchedFile, spy);
+      await wait(20);
+
+      fs.writeFileSync(watchedFile, 'changed');
+      await condition(() => spy.calls.count() > 0);
+      expect(spy).toHaveBeenCalledWith('change', '');
+
+      let movedDir = path.join(tempDir, 'recreated-parent-moved');
+      dirsToClean.push(movedDir);
+      fs.renameSync(subDir, movedDir);
+      await wait(200);
+
+      // Put a different file at the path we were asked to watch. We don't
+      // assert anything about how this is reported; backends are free to
+      // notice it or not.
+      fs.mkdirSync(subDir);
+      fs.writeFileSync(watchedFile, 'a different file');
+      await wait(200);
+
+      spy.calls.reset();
+
+      // A write to the _moved_ file must not be reported as a change to the
+      // file that now lives at the old path.
+      fs.writeFileSync(path.join(movedDir, 'file'), 'changed again');
+      await wait(200);
+
+      expect(spy).not.toHaveBeenCalled();
+    });
+  });
 
   describe('when a file under a watched directory is deleted', () => {
     it('fires the callback with the change event and empty path', async () => {
